@@ -247,6 +247,18 @@ export class CompositionEngine {
     const { canvas, settings } = this;
     const layout = settings.layout;
 
+    // Even in "both" capture mode, the layout picker lets you produce a
+    // take that's 100% screen or 100% camera without switching modes and
+    // losing the other source (PRD §11).
+    if (layout === "screen-only") {
+      if (screen) this.drawScreen(screen, 0, 0, canvas.width, canvas.height);
+      return;
+    }
+    if (layout === "camera-only") {
+      this.drawCameraLayer(now, 0, 0, canvas.width, canvas.height, "rectangle", 0, false, false);
+      return;
+    }
+
     if (layout === "side-by-side") {
       if (screen) this.drawScreen(screen, 0, 0, canvas.width / 2, canvas.height);
       this.drawCameraLayer(now, canvas.width / 2, 0, canvas.width / 2, canvas.height, "rectangle", 0, false, false);

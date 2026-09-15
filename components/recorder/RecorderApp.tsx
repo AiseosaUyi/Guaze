@@ -208,7 +208,15 @@ export function RecorderApp() {
     void beginRecording();
   }, [beginRecording]);
 
+  // Coming back from the export screen without "Record another" (i.e. the
+  // recording streams and compositor were already torn down in
+  // stopRecording) needs a fresh CompositionEngine bound to the <canvas>
+  // StudioScreen remounts — otherwise the setup effect sees a stale,
+  // disposed compositor reference and never rebinds it, and the preview
+  // stays blank.
   const backToSetup = useCallback(() => {
+    compositorRef.current?.dispose();
+    compositorRef.current = null;
     setStage("setup");
   }, [setStage]);
 

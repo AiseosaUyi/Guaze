@@ -16,19 +16,26 @@ it is not the full P0 list from the PRD, but every piece is built to extend into
 
 - [x] Next.js 16 / React 19 / TypeScript / Tailwind v4 app scaffolded
 - [x] Design system: light / dark / system theme, tokens, primitives
-- [ ] Mode select screen (Screen / Camera / Screen + Camera)
-- [ ] Capture layer: getDisplayMedia, getUserMedia, device enumeration
-- [ ] Background segmentation (MediaPipe Image Segmenter, local, in a Worker): none / blur / image
-- [ ] Composition canvas engine: draws screen + processed camera per layout, at the
+- [x] Mode select screen (Screen / Camera / Screen + Camera)
+- [x] Capture layer: getDisplayMedia, getUserMedia, device enumeration
+- [x] Background segmentation (MediaPipe Image Segmenter, local, main-thread WASM): none / blur / image / built-in
+- [x] Composition canvas engine: draws screen + processed camera per layout, at the
       chosen resolution/fps, exposes `canvas.captureStream()`
-- [ ] Studio screen: live preview, background picker, camera position/size/shape,
+- [x] Studio screen: live preview, background picker, camera position/size/shape,
       layout presets, quality preset picker, mic/system-audio toggles
-- [ ] Recorder engine: MediaRecorder wrapper, pause/resume/restart, composition-event
+- [x] Recorder engine: MediaRecorder wrapper, pause/resume/restart, composition-event
       log (timestamped layout changes, so a future editor doesn't need a re-record)
-- [ ] Minimal recording HUD (timer, pause, stop — never present in the recorded frame)
-- [ ] Preview + export screen: resolution / fps / quality preset / format / aspect ratio,
-      download to disk
-- [ ] Device capability probe with graceful fallback (4K60 → 1080p60 → 1080p30)
+- [x] Minimal recording HUD (timer, pause, stop — never present in the recorded frame)
+- [x] Preview + export screen: resolution / fps / quality preset / format / aspect ratio,
+      re-encode pipeline, download to disk
+- [x] Device capability probe with graceful fallback (4K60 → 1080p60 → 1080p30)
+
+Code is written and passes `tsc --noEmit` / `next build` / `eslint` cleanly, but
+**has not yet been exercised in a real browser** — the build sandbox this was
+built in has no way to grant camera/screen permissions or render a page for
+a screenshot. Running it for the first time (`npm run dev`, click through
+every mode, both themes) is the next concrete step and will surface real
+bugs no static check can catch — see "Known risk areas" below.
 
 ## Phase 1 — P0 completion (next)
 Everything in the PRD's P0 list not covered above:
