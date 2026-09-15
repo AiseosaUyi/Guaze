@@ -10,9 +10,10 @@ import {
   getMicStream,
   getScreenStream,
   listDevices,
+  screenAspectFromStream,
   stopStream,
 } from "@/lib/recording/capture";
-import { QUALITY_PRESETS, resolveQualityDims } from "@/lib/recording/presets";
+import { QUALITY_PRESETS, computeEffectiveDims, resolveQualityDims } from "@/lib/recording/presets";
 import { recommendQuality } from "@/lib/recording/performance";
 import { ModeSelectScreen } from "@/components/recorder/ModeSelectScreen";
 import { StudioScreen } from "@/components/recorder/StudioScreen";
@@ -42,6 +43,10 @@ export function RecorderApp() {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [paused, setPaused] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [canvasDims, setCanvasDims] = useState<{ width: number; height: number }>(() =>
+    resolveQualityDims(settings.quality, settings.customQuality)
+  );
 
   const settingsRef = useRef(settings);
   useEffect(() => {
@@ -83,6 +88,7 @@ export function RecorderApp() {
           screenVideo: screenVideoElRef.current,
           cameraVideo: el,
         });
+        setCameraReady(true);
         if (settingsRef.current.audio.micEnabled) {
           const mic = await getMicStream({
             deviceId: settingsRef.current.audio.micDeviceId,
@@ -104,16 +110,27 @@ export function RecorderApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage]);
 
+  // Resizes the compositor canvas to match the real captured screen's aspect
+  // ratio (when a screen source exists) instead of always forcing the
+  // quality preset's 16:9 box — otherwise a display that isn't 16:9
+  // (MacBook panels are 16:10, ultrawides are 21:9, etc.) gets letterboxed
+  // with black bars. Also updates React state so StudioScreen's CSS
+  // aspect-ratio matches, keeping the on-screen preview undistorted.
+  const applyCanvasDims = useCallback((quality: { width: number; height: number }) => {
+    const dims = computeEffectiveDims(quality, screenAspectFromStream(screenStreamRef.current));
+    compositorRef.current?.resize(dims.width, dims.height);
+    setCanvasDims(dims);
+  }, []);
+
   // Keep the compositor's settings (and canvas resolution) in sync, and log
   // a composition event whenever something changes mid-take.
   useEffect(() => {
     compositorRef.current?.updateSettings(settings);
-    const quality = resolveQualityDims(settings.quality, settings.customQuality);
-    compositorRef.current?.resize(quality.width, quality.height);
+    applyCanvasDims(resolveQualityDims(settings.quality, settings.customQuality));
     if (recorderRef.current.state === "recording" || recorderRef.current.state === "paused") {
       recorderRef.current.logCompositionEvent("layout", settings);
     }
-  }, [settings]);
+  }, [settings, applyCanvasDims]);
 
   useEffect(() => {
     if (stage !== "recording") return;
@@ -148,7 +165,7 @@ export function RecorderApp() {
         });
       }
 
-      compositorRef.current?.resize(effectiveQuality.width, effectiveQuality.height);
+      applyCanvasDims(effectiveQuality);
       const canvasStream = compositorRef.current!.getStream(effectiveQuality.fps);
       const audioSources = [micStreamRef.current, screenStreamRef.current].filter(
         (s): s is MediaStream => !!s
@@ -166,7 +183,7 @@ export function RecorderApp() {
     } finally {
       setBusy(false);
     }
-  }, [settings, attachVideo, setStage, setError, setCapability]);
+  }, [settings, attachVideo, applyCanvasDims, setStage, setError, setCapability]);
 
   const pauseRecording = useCallback(() => {
     recorderRef.current.pause();
@@ -229,6 +246,7 @@ export function RecorderApp() {
     screenStreamRef.current = null;
     cameraStreamRef.current = null;
     micStreamRef.current = null;
+    setCameraReady(false);
     reset();
   }, [reset]);
 
@@ -248,10 +266,12 @@ export function RecorderApp() {
   return (
     <StudioScreen
       canvasRef={canvasRef}
+      canvasDims={canvasDims}
       recording={stage === "recording"}
       paused={paused}
       elapsedMs={elapsedMs}
       busy={busy}
+      cameraReady={cameraReady}
       onStartRecording={() => void beginRecording()}
       onPause={pauseRecording}
       onResume={resumeRecording}

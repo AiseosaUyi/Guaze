@@ -128,3 +128,13 @@ export async function listDevices(
 export function stopStream(stream: MediaStream | null | undefined) {
   stream?.getTracks().forEach((track) => track.stop());
 }
+
+/** The screen track's actual captured aspect ratio, read from its resolved
+ * MediaStreamTrack settings. Available immediately once getDisplayMedia
+ * resolves — unlike a <video> element's videoWidth/videoHeight, which waits
+ * for the loadedmetadata event — so the recording canvas can be sized to
+ * match the real display before the first frame is drawn. */
+export function screenAspectFromStream(stream: MediaStream | null): number | null {
+  const { width, height } = stream?.getVideoTracks()[0]?.getSettings() ?? {};
+  return width && height ? width / height : null;
+}

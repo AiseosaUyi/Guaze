@@ -38,8 +38,13 @@ export function ModeSelectScreen() {
   return (
     <div className="flex min-h-screen flex-col">
       <header className="flex items-center justify-between px-6 py-5">
-        <span className="text-sm font-medium text-muted-foreground">
-          Social Screen Recorder
+        <span className="flex items-center gap-2">
+          <span className="flex h-6 w-6 items-center justify-center rounded-md bg-accent">
+            <span className="h-2.5 w-2.5 rounded-full border-2 border-accent-foreground" />
+          </span>
+          <span className="text-sm font-medium text-foreground">
+            Social Screen Recorder
+          </span>
         </span>
         <ThemeToggle />
       </header>

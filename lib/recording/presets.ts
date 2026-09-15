@@ -52,6 +52,28 @@ export function resolveQualityDims(
   return QUALITY_PRESETS[quality];
 }
 
+/** Adapts a quality preset's target pixel budget to the actual aspect ratio
+ * of the captured screen, so the live recording canvas never has to
+ * letterbox/pillarbox a display that isn't 16:9 (MacBook panels are 16:10,
+ * ultrawides are 21:9, some external monitors are 4:3, etc). Keeps the
+ * preset's total pixel count roughly constant so encoded detail/bitrate
+ * still matches the label (e.g. "1080p"). Falls back to the preset's own
+ * (16:9) dims when no screen aspect is known yet — camera-only mode, or
+ * before the screen picker has resolved. */
+export function computeEffectiveDims(
+  quality: Pick<QualityPreset, "width" | "height">,
+  screenAspect: number | null
+): { width: number; height: number } {
+  if (!screenAspect) return { width: quality.width, height: quality.height };
+  const area = quality.width * quality.height;
+  let height = Math.round(Math.sqrt(area / screenAspect));
+  let width = Math.round(height * screenAspect);
+  // Even dimensions avoid chroma-subsampling edge cases in some encoders.
+  height -= height % 2;
+  width -= width % 2;
+  return { width, height };
+}
+
 export const QUALITY_PRESET_ORDER: QualityPresetId[] = [
   "social",
   "high",

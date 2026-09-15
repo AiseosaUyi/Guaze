@@ -33,7 +33,7 @@ export type CameraPosition =
   | "bottom-right"
   | "custom";
 
-export type CameraSizeToken = "small" | "medium" | "large";
+export type CameraSizeToken = "tiny" | "small" | "medium" | "large";
 
 export interface CameraTransform {
   position: CameraPosition;
@@ -45,6 +45,15 @@ export interface CameraTransform {
   cornerRadius: number;
   border: boolean;
   shadow: boolean;
+}
+
+export interface FrameSettings {
+  enabled: boolean;
+  /** Percentage of the shorter canvas dimension used as padding. */
+  padding: number;
+  cornerRadius: number;
+  shadow: boolean;
+  backdropId: string;
 }
 
 export type LayoutPreset =
@@ -80,6 +89,7 @@ export type ExportFormat = "mp4" | "webm";
 export interface RecordingSettings {
   mode: SourceMode;
   layout: LayoutPreset;
+  frame: FrameSettings;
   background: {
     mode: BackgroundMode;
     blurStrength: BlurStrength;
@@ -103,12 +113,23 @@ export interface RecordingSettings {
   };
 }
 
+/** A user-authored "zoom into this region" edit applied post-recording,
+ * during export. `rect` is normalized 0..1 against the recorded video's
+ * full frame, not screen coordinates — so it survives resolution/aspect
+ * changes made at export time. Keyframes are non-overlapping in time. */
+export interface ZoomKeyframe {
+  id: string;
+  startMs: number;
+  endMs: number;
+  rect: { x: number; y: number; w: number; h: number };
+}
+
 /** A timestamped change to the composition, captured during recording so a
  * future editor can re-render the take with the same layout changes without
  * asking the user to re-record. Timestamps are ms from recording start. */
 export interface CompositionEvent {
   atMs: number;
-  type: "layout" | "background" | "camera";
+  type: "layout" | "background" | "camera" | "frame";
   settings: Partial<RecordingSettings>;
 }
 

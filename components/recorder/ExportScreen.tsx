@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
+import { ZoomRegionOverlay, ZoomTimeline } from "@/components/recorder/ZoomEditor";
 import { formatDuration } from "@/lib/utils";
 
 export function ExportScreen({
@@ -20,6 +21,8 @@ export function ExportScreen({
   onBackToSetup: () => void;
 }) {
   const result = useRecorderStore((s) => s.result);
+  const zoomKeyframes = useRecorderStore((s) => s.zoomKeyframes);
+  const updateZoomKeyframe = useRecorderStore((s) => s.updateZoomKeyframe);
   const [quality, setQuality] = React.useState<QualityPresetId>("social");
   const [format, setFormat] = React.useState<ExportFormat>("mp4");
   const [aspect, setAspect] = React.useState<AspectRatioId>("original");
@@ -28,6 +31,10 @@ export function ExportScreen({
   const [exportedUrl, setExportedUrl] = React.useState<string | null>(null);
   const [exportedName, setExportedName] = React.useState("");
   const [exportError, setExportError] = React.useState<string | null>(null);
+  const [selectedZoomId, setSelectedZoomId] = React.useState<string | null>(null);
+  const [videoAspect, setVideoAspect] = React.useState<number | null>(null);
+  const videoRef = React.useRef<HTMLVideoElement | null>(null);
+  const selectedZoom = zoomKeyframes.find((k) => k.id === selectedZoomId) ?? null;
 
   if (!result) {
     return (
@@ -57,6 +64,7 @@ export function ExportScreen({
         videoBitsPerSecond: dims.videoBitsPerSecond,
         format,
         aspect,
+        zoomKeyframes,
         onProgress: setProgress,
       });
       const url = URL.createObjectURL(blob);
@@ -83,10 +91,33 @@ export function ExportScreen({
         </header>
         <div className="flex flex-1 flex-col items-center justify-center gap-4 p-6">
           <h1 className="text-xl font-semibold">Your recording is ready</h1>
-          <video
-            src={result.url}
-            controls
-            className="max-h-[60vh] w-full max-w-3xl rounded-xl border border-border bg-black shadow-[0_1px_2px_rgba(0,0,0,.04),0_8px_24px_rgba(0,0,0,.08)]"
+          <div
+            className="relative max-h-[60vh] w-full max-w-3xl"
+            style={videoAspect ? { aspectRatio: `${videoAspect}` } : undefined}
+          >
+            <video
+              ref={videoRef}
+              src={result.url}
+              controls
+              onLoadedMetadata={(e) => {
+                const v = e.currentTarget;
+                if (v.videoWidth && v.videoHeight) setVideoAspect(v.videoWidth / v.videoHeight);
+              }}
+              className="h-full w-full rounded-xl border border-border bg-black shadow-[0_1px_2px_rgba(0,0,0,.04),0_8px_24px_rgba(0,0,0,.08)]"
+            />
+            {selectedZoom && (
+              <ZoomRegionOverlay
+                videoRef={videoRef}
+                keyframe={selectedZoom}
+                onChange={(rect) => updateZoomKeyframe(selectedZoom.id, { rect })}
+              />
+            )}
+          </div>
+          <ZoomTimeline
+            videoRef={videoRef}
+            durationMs={result.durationMs}
+            selectedId={selectedZoomId}
+            onSelect={setSelectedZoomId}
           />
           <p className="text-xs text-muted-foreground">
             {formatDuration(result.durationMs)} · {result.format.toUpperCase()}

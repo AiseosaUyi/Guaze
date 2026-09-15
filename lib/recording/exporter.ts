@@ -1,4 +1,4 @@
-import type { AspectRatioId, ExportFormat } from "./types";
+import type { AspectRatioId, ExportFormat, ZoomKeyframe } from "./types";
 import { pickMimeType } from "./recorder";
 import { ASPECT_RATIOS } from "./presets";
 
@@ -10,7 +10,50 @@ export interface ExportOptions {
   videoBitsPerSecond: number;
   format: ExportFormat;
   aspect: AspectRatioId;
+  zoomKeyframes?: ZoomKeyframe[];
   onProgress?: (fraction: number) => void;
+}
+
+const FULL_RECT = { x: 0, y: 0, w: 1, h: 1 };
+/** Ease-in/out window either side of a keyframe's [start, end] — the zoom
+ * glides in, holds, then glides back out rather than snapping. */
+const ZOOM_TRANSITION_MS = 350;
+
+function easeInOutCubic(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+function lerpRect(
+  a: { x: number; y: number; w: number; h: number },
+  b: { x: number; y: number; w: number; h: number },
+  t: number
+) {
+  return {
+    x: a.x + (b.x - a.x) * t,
+    y: a.y + (b.y - a.y) * t,
+    w: a.w + (b.w - a.w) * t,
+    h: a.h + (b.h - a.h) * t,
+  };
+}
+
+/** Normalized (0..1, relative to the full source frame) region the export
+ * should be zoomed into at `timeMs`, easing between the full frame and each
+ * keyframe's target rect at its boundaries. Keyframes are assumed
+ * non-overlapping, so the first match wins. */
+function getActiveZoomRect(keyframes: ZoomKeyframe[], timeMs: number) {
+  for (const kf of keyframes) {
+    if (timeMs < kf.startMs - ZOOM_TRANSITION_MS || timeMs > kf.endMs + ZOOM_TRANSITION_MS) continue;
+    let t: number;
+    if (timeMs < kf.startMs) {
+      t = (timeMs - (kf.startMs - ZOOM_TRANSITION_MS)) / ZOOM_TRANSITION_MS;
+    } else if (timeMs > kf.endMs) {
+      t = 1 - (timeMs - kf.endMs) / ZOOM_TRANSITION_MS;
+    } else {
+      t = 1;
+    }
+    return lerpRect(FULL_RECT, kf.rect, easeInOutCubic(Math.max(0, Math.min(1, t))));
+  }
+  return FULL_RECT;
 }
 
 export interface ExportResult {
@@ -50,18 +93,29 @@ export async function exportRecording(opts: ExportOptions): Promise<ExportResult
   if (!ctx) throw new Error("2D canvas context is not available.");
 
   const targetRatio = ASPECT_RATIOS[opts.aspect].ratio ?? video.videoWidth / video.videoHeight;
+  const zoomKeyframes = opts.zoomKeyframes ?? [];
 
   const draw = () => {
-    const srcRatio = video.videoWidth / video.videoHeight;
-    let sw = video.videoWidth;
-    let sh = video.videoHeight;
+    // First crop down to whatever region the active zoom keyframe (if any)
+    // wants on screen right now, then fit-crop THAT region to the target
+    // aspect ratio — same "cover" math as before, just operating on the
+    // zoomed-in bounds instead of the full frame.
+    const zoom = getActiveZoomRect(zoomKeyframes, video.currentTime * 1000);
+    const zx = zoom.x * video.videoWidth;
+    const zy = zoom.y * video.videoHeight;
+    const zw = zoom.w * video.videoWidth;
+    const zh = zoom.h * video.videoHeight;
+
+    const srcRatio = zw / zh;
+    let sw = zw;
+    let sh = zh;
     if (srcRatio > targetRatio) {
-      sw = video.videoHeight * targetRatio;
+      sw = zh * targetRatio;
     } else {
-      sh = video.videoWidth / targetRatio;
+      sh = zw / targetRatio;
     }
-    const sx = (video.videoWidth - sw) / 2;
-    const sy = (video.videoHeight - sh) / 2;
+    const sx = zx + (zw - sw) / 2;
+    const sy = zy + (zh - sh) / 2;
     ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
   };
 

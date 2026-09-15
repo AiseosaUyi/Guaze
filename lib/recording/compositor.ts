@@ -15,6 +15,7 @@ interface Rect {
 }
 
 const SIZE_FRACTIONS: Record<CameraTransform["size"], number> = {
+  tiny: 0.13,
   small: 0.2,
   medium: 0.28,
   large: 0.4,
@@ -36,6 +37,30 @@ function coverFitSource(
     sh = srcW / dstRatio;
   }
   return { sx: (srcW - sw) / 2, sy: (srcH - sh) / 2, sw, sh };
+}
+
+/** Fits the whole source inside the destination box without cropping —
+ * unlike coverFitSource, nothing outside the box is ever cut off. Used for
+ * the screen share so the user always sees their entire screen; any
+ * leftover space is letterboxed against the canvas's existing black fill. */
+function containFitDest(
+  srcW: number,
+  srcH: number,
+  boxX: number,
+  boxY: number,
+  boxW: number,
+  boxH: number
+) {
+  const srcRatio = srcW / srcH;
+  const boxRatio = boxW / boxH;
+  let dw = boxW;
+  let dh = boxH;
+  if (srcRatio > boxRatio) {
+    dh = boxW / srcRatio;
+  } else {
+    dw = boxH * srcRatio;
+  }
+  return { dx: boxX + (boxW - dw) / 2, dy: boxY + (boxH - dh) / 2, dw, dh };
 }
 
 function angledGradient(
@@ -122,6 +147,27 @@ function clipShape(
   ctx.clip();
 }
 
+/** Builds a rounded-rect path without clipping, so callers can choose to
+ * `.fill()` (for a shadow-casting card) or `.clip()` (for the content mask)
+ * independently. */
+function roundedRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  cornerRadius: number
+) {
+  const radius = Math.max(0, Math.min(cornerRadius, h / 2, w / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
 /**
  * Owns the offscreen canvas that the whole recording is drawn to, one
  * requestAnimationFrame at a time. Also owns the SegmentationEngine, since
@@ -137,6 +183,7 @@ export class CompositionEngine {
 
   // Reused offscreen buffers to avoid per-frame allocation.
   private maskCanvas = document.createElement("canvas");
+  private featherCanvas = document.createElement("canvas");
   private personCanvas = document.createElement("canvas");
   private layerCanvas = document.createElement("canvas");
   private backgroundImage: HTMLImageElement | null = null;
@@ -222,18 +269,68 @@ export class CompositionEngine {
   private draw(now: number) {
     const { ctx, canvas, settings, sources } = this;
     ctx.save();
-    ctx.fillStyle = "#000";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    const hasScreen = settings.mode !== "camera" && this.readyVideo(sources.screenVideo);
+    // The "frame" is the Screen-Studio-style padded backdrop: the actual
+    // recording composites into a smaller, rounded, shadowed content rect
+    // instead of the full canvas, with a gradient/wallpaper filling the rest.
+    // When disabled, cx/cy/cw/ch collapse to the full canvas and every draw
+    // call below behaves exactly as it did before the frame existed.
+    const frame = settings.frame;
+    let cx = 0;
+    let cy = 0;
+    let cw = canvas.width;
+    let ch = canvas.height;
+
+    if (frame.enabled) {
+      this.drawBackdrop(canvas.width, canvas.height, frame.backdropId);
+      const pad = Math.round(Math.min(canvas.width, canvas.height) * (frame.padding / 100));
+      cx = pad;
+      cy = pad;
+      cw = canvas.width - pad * 2;
+      ch = canvas.height - pad * 2;
+
+      if (frame.shadow) {
+        ctx.save();
+        ctx.shadowColor = "rgba(0,0,0,0.45)";
+        ctx.shadowBlur = Math.max(8, Math.round(cw * 0.035));
+        ctx.shadowOffsetY = Math.max(4, Math.round(cw * 0.012));
+        ctx.fillStyle = "#000";
+        roundedRectPath(ctx, cx, cy, cw, ch, frame.cornerRadius);
+        ctx.fill();
+        ctx.restore();
+      }
+      roundedRectPath(ctx, cx, cy, cw, ch, frame.cornerRadius);
+      ctx.clip();
+    } else {
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    // Screen capture is only requested once recording actually starts (it
+    // needs the OS picker), so sources.screenVideo stays null for the whole
+    // setup phase — that's expected, not a dropped source. Only treat a
+    // missing screen as a mid-recording failure (and fall back to full-frame
+    // camera so the take isn't lost) once a screen video has actually been
+    // attached at least once.
+    const screenRequested = settings.mode !== "camera" && sources.screenVideo !== null;
+    const hasScreen = screenRequested && this.readyVideo(sources.screenVideo);
     const hasCamera = settings.mode !== "screen" && this.readyVideo(sources.cameraVideo);
 
-    if (settings.mode === "screen" || (!hasCamera && hasScreen)) {
-      if (hasScreen) this.drawScreen(sources.screenVideo!, 0, 0, canvas.width, canvas.height);
-    } else if (settings.mode === "camera" || (!hasScreen && hasCamera)) {
-      if (hasCamera) this.drawCameraLayer(now, 0, 0, canvas.width, canvas.height, "rectangle", 0, false, false);
-    } else if (hasScreen && hasCamera) {
-      this.drawBoth(now, hasScreen ? sources.screenVideo! : null, sources.cameraVideo!);
+    if (settings.mode === "screen") {
+      if (hasScreen) this.drawScreen(sources.screenVideo!, cx, cy, cw, ch);
+    } else if (settings.mode === "camera") {
+      if (hasCamera) this.drawCameraLayer(now, cx, cy, cw, ch, "rectangle", 0, false, false);
+    } else if (screenRequested && !hasScreen && hasCamera) {
+      this.drawCameraLayer(now, cx, cy, cw, ch, "rectangle", 0, false, false);
+    } else if (hasCamera) {
+      // Setup preview (no screen yet) or a normal both-sources take —
+      // drawBoth already places the camera at its configured bubble
+      // position against a placeholder when screen is absent, so the setup
+      // preview matches the eventual recording layout instead of the camera
+      // filling the whole frame.
+      this.drawBoth(now, hasScreen ? sources.screenVideo! : null, sources.cameraVideo!, cx, cy, cw, ch);
+    } else if (hasScreen) {
+      this.drawScreen(sources.screenVideo!, cx, cy, cw, ch);
     }
 
     ctx.restore();
@@ -243,54 +340,74 @@ export class CompositionEngine {
     return !!v && v.readyState >= 2 && v.videoWidth > 0;
   }
 
-  private drawBoth(now: number, screen: HTMLVideoElement | null, camera: HTMLVideoElement) {
-    const { canvas, settings } = this;
+  /** Fills the full canvas with the frame's wallpaper/gradient backdrop. */
+  private drawBackdrop(w: number, h: number, backdropId: string) {
+    const { ctx } = this;
+    const bg = BUILTIN_BACKGROUNDS.find((b) => b.id === backdropId) ?? BUILTIN_BACKGROUNDS[0];
+    ctx.fillStyle = angledGradient(ctx, w, h, bg.angleDeg, bg.stops);
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  private drawBoth(
+    now: number,
+    screen: HTMLVideoElement | null,
+    camera: HTMLVideoElement,
+    cx: number,
+    cy: number,
+    cw: number,
+    ch: number
+  ) {
+    const { settings } = this;
     const layout = settings.layout;
 
     // Even in "both" capture mode, the layout picker lets you produce a
     // take that's 100% screen or 100% camera without switching modes and
     // losing the other source (PRD §11).
     if (layout === "screen-only") {
-      if (screen) this.drawScreen(screen, 0, 0, canvas.width, canvas.height);
+      if (screen) this.drawScreen(screen, cx, cy, cw, ch);
+      else this.drawScreenPlaceholder(cx, cy, cw, ch);
       return;
     }
     if (layout === "camera-only") {
-      this.drawCameraLayer(now, 0, 0, canvas.width, canvas.height, "rectangle", 0, false, false);
+      this.drawCameraLayer(now, cx, cy, cw, ch, "rectangle", 0, false, false);
       return;
     }
 
     if (layout === "side-by-side") {
-      if (screen) this.drawScreen(screen, 0, 0, canvas.width / 2, canvas.height);
-      this.drawCameraLayer(now, canvas.width / 2, 0, canvas.width / 2, canvas.height, "rectangle", 0, false, false);
+      if (screen) this.drawScreen(screen, cx, cy, cw / 2, ch);
+      else this.drawScreenPlaceholder(cx, cy, cw / 2, ch);
+      this.drawCameraLayer(now, cx + cw / 2, cy, cw / 2, ch, "rectangle", 0, false, false);
       return;
     }
 
     if (layout === "split") {
-      if (screen) this.drawScreen(screen, 0, 0, canvas.width, canvas.height / 2);
-      this.drawCameraLayer(now, 0, canvas.height / 2, canvas.width, canvas.height / 2, "rectangle", 0, false, false);
+      if (screen) this.drawScreen(screen, cx, cy, cw, ch / 2);
+      else this.drawScreenPlaceholder(cx, cy, cw, ch / 2);
+      this.drawCameraLayer(now, cx, cy + ch / 2, cw, ch / 2, "rectangle", 0, false, false);
       return;
     }
 
     if (layout === "camera-focus") {
-      this.drawCameraLayer(now, 0, 0, canvas.width, canvas.height, "rectangle", 0, false, false);
+      this.drawCameraLayer(now, cx, cy, cw, ch, "rectangle", 0, false, false);
       if (screen) {
-        const rect = overlayRect(canvas.width, canvas.height, {
+        const rect = overlayRect(cw, ch, {
           ...settings.camera,
           position: settings.camera.position === "custom" ? "bottom-right" : settings.camera.position,
           shape: "rounded",
         }, 16 / 9);
-        this.drawScreen(screen, rect.x, rect.y, rect.w, rect.h, true);
+        this.drawScreen(screen, cx + rect.x, cy + rect.y, rect.w, rect.h, true);
       }
       return;
     }
 
     // floating / pip (and camera-only fallback with a screen present)
-    if (screen) this.drawScreen(screen, 0, 0, canvas.width, canvas.height);
-    const rect = overlayRect(canvas.width, canvas.height, settings.camera, camera.videoWidth / camera.videoHeight || 16 / 9);
+    if (screen) this.drawScreen(screen, cx, cy, cw, ch);
+    else this.drawScreenPlaceholder(cx, cy, cw, ch);
+    const rect = overlayRect(cw, ch, settings.camera, camera.videoWidth / camera.videoHeight || 16 / 9);
     this.drawCameraLayer(
       now,
-      rect.x,
-      rect.y,
+      cx + rect.x,
+      cy + rect.y,
       rect.w,
       rect.h,
       settings.camera.shape,
@@ -309,7 +426,6 @@ export class CompositionEngine {
     rounded = false
   ) {
     const { ctx } = this;
-    const { sx, sy, sw, sh } = coverFitSource(video.videoWidth, video.videoHeight, w, h);
     ctx.save();
     if (rounded) {
       clipShape(ctx, { x, y, w, h }, {
@@ -324,8 +440,15 @@ export class CompositionEngine {
       });
       ctx.fillStyle = "#000";
       ctx.fillRect(x, y, w, h);
+    } else {
+      // Full-frame draws land on top of the canvas's own black fill from
+      // draw(), but filling here too keeps this box correct in isolation
+      // (e.g. side-by-side/split call this with less than the full canvas).
+      ctx.fillStyle = "#000";
+      ctx.fillRect(x, y, w, h);
     }
-    ctx.drawImage(video, sx, sy, sw, sh, x, y, w, h);
+    const { dx, dy, dw, dh } = containFitDest(video.videoWidth, video.videoHeight, x, y, w, h);
+    ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, dx, dy, dw, dh);
     ctx.restore();
     if (rounded) {
       ctx.save();
@@ -344,6 +467,24 @@ export class CompositionEngine {
       ctx.stroke();
       ctx.restore();
     }
+  }
+
+  /** Fills the region where the screen would go before recording starts
+   * (getDisplayMedia can only be requested on the actual Start click), so the
+   * setup preview reads as "your screen goes here" instead of a stray black
+   * hole next to the camera bubble. */
+  private drawScreenPlaceholder(x: number, y: number, w: number, h: number) {
+    const { ctx } = this;
+    if (w < 120 || h < 60) return;
+    ctx.save();
+    ctx.fillStyle = "#161616";
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = "rgba(255,255,255,0.32)";
+    ctx.font = `${Math.max(11, Math.round(Math.min(w, h) * 0.045))}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Your screen appears here when you record", x + w / 2, y + h / 2);
+    ctx.restore();
   }
 
   /** Draws the processed (background-replaced) camera into the destination
@@ -423,7 +564,7 @@ export class CompositionEngine {
       return this.layerCanvas;
     }
 
-    const alpha = this.maskToAlphaCanvas(mask);
+    const alpha = this.maskToAlphaCanvas(mask, vw, vh);
 
     // 1. Paint the background layer (blurred self, image, or built-in CSS).
     layerCtx.filter = "none";
@@ -469,20 +610,58 @@ export class CompositionEngine {
     return this.layerCanvas;
   }
 
-  /** Renders a Float32Array confidence mask into a feathered alpha canvas at
-   * the video's resolution. */
-  private maskToAlphaCanvas(mask: SegmentationMask): HTMLCanvasElement {
-    if (this.maskCanvas.width !== mask.width || this.maskCanvas.height !== mask.height) {
-      this.maskCanvas.width = mask.width;
-      this.maskCanvas.height = mask.height;
+  /** Renders a Float32Array confidence mask into a refined alpha canvas at
+   * the video's resolution.
+   *
+   * The segmenter's raw confidence has a wide, noisy "maybe" band around
+   * hair and fast-moving edges — the model is genuinely unsure there, not
+   * just low-resolution. Blurring that raw band (the previous approach)
+   * only smears the uncertainty wider, which reads as a visible ghost /
+   * double-exposure seam once the background is a photo of the real room
+   * rather than a forgiving blur or gradient. The standard real-time matting
+   * fix is erode-then-sharpen-then-feather, in that order: a small min-filter
+   * pulls the silhouette in just past the unsure band, a steep sigmoid
+   * snaps what's left toward decisively foreground/background, and only
+   * then does a light blur anti-alias the now-thin, confident edge. */
+  private maskToAlphaCanvas(mask: SegmentationMask, vw: number, vh: number): HTMLCanvasElement {
+    const { width: w, height: h, data } = mask;
+    if (this.maskCanvas.width !== w || this.maskCanvas.height !== h) {
+      this.maskCanvas.width = w;
+      this.maskCanvas.height = h;
     }
     const maskCtx = this.maskCanvas.getContext("2d")!;
-    const imageData = maskCtx.createImageData(mask.width, mask.height);
-    for (let i = 0; i < mask.data.length; i++) {
-      const a = Math.max(0, Math.min(1, mask.data[i])) * 255;
-      imageData.data[i * 4 + 3] = a;
+    const imageData = maskCtx.createImageData(w, h);
+    const SHARPEN_K = 10;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let min = 1;
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= h) continue;
+          const rowOffset = ny * w;
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx;
+            if (nx < 0 || nx >= w) continue;
+            const v = data[rowOffset + nx];
+            if (v < min) min = v;
+          }
+        }
+        const sharpened = 1 / (1 + Math.exp(-(min - 0.5) * SHARPEN_K));
+        imageData.data[(y * w + x) * 4 + 3] = Math.max(0, Math.min(1, sharpened)) * 255;
+      }
     }
     maskCtx.putImageData(imageData, 0, 0);
-    return this.maskCanvas;
+
+    if (this.featherCanvas.width !== vw || this.featherCanvas.height !== vh) {
+      this.featherCanvas.width = vw;
+      this.featherCanvas.height = vh;
+    }
+    const featherCtx = this.featherCanvas.getContext("2d")!;
+    featherCtx.clearRect(0, 0, vw, vh);
+    const featherPx = Math.max(1, Math.round(vw * 0.0025));
+    featherCtx.filter = `blur(${featherPx}px)`;
+    featherCtx.drawImage(this.maskCanvas, 0, 0, vw, vh);
+    featherCtx.filter = "none";
+    return this.featherCanvas;
   }
 }
