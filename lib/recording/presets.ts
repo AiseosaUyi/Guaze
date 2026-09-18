@@ -62,12 +62,18 @@ export function resolveQualityDims(
  * before the screen picker has resolved. */
 export function computeEffectiveDims(
   quality: Pick<QualityPreset, "width" | "height">,
-  screenAspect: number | null
+  screenAspect: number | null,
+  forcedAspect?: number | null
 ): { width: number; height: number } {
-  if (!screenAspect) return { width: quality.width, height: quality.height };
+  // A user-chosen live aspect ratio (e.g. 9:16 for TikTok/Reels/Shorts)
+  // wins over the auto-detected screen aspect — they explicitly asked for
+  // a portrait/square canvas, so the actual captured display's shape
+  // shouldn't override that choice.
+  const ratio = forcedAspect ?? screenAspect;
+  if (!ratio) return { width: quality.width, height: quality.height };
   const area = quality.width * quality.height;
-  let height = Math.round(Math.sqrt(area / screenAspect));
-  let width = Math.round(height * screenAspect);
+  let height = Math.round(Math.sqrt(area / ratio));
+  let width = Math.round(height * ratio);
   // Even dimensions avoid chroma-subsampling edge cases in some encoders.
   height -= height % 2;
   width -= width % 2;

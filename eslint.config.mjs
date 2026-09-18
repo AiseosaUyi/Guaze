@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Vendored ffmpeg.wasm core/worker files (scripts/copy-ffmpeg-core.mjs) —
+    // generated, gitignored, not this project's code.
+    "public/ffmpeg/**",
   ]),
 ]);
 

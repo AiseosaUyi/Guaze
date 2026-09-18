@@ -7,22 +7,28 @@ import {
   ChevronDown,
   Circle,
   Frame as FrameIcon,
+  Image as ImageIcon,
   Layers,
   LayoutTemplate,
   Loader2,
   Mic,
   Monitor,
   MonitorPlay,
+  MonitorSmartphone,
   RectangleHorizontal,
+  RectangleVertical,
   RotateCcw,
   Settings2,
   SlidersHorizontal,
   Sparkles,
   Square as SquareIcon,
+  Video as VideoIcon,
   Volume2,
+  X as XIcon,
 } from "lucide-react";
 import { useRecorderStore } from "@/lib/store/useRecorderStore";
 import type {
+  AspectRatioId,
   BackgroundMode,
   CameraPosition,
   CameraSizeToken,
@@ -31,7 +37,7 @@ import type {
   RecordingSettings,
   SourceMode,
 } from "@/lib/recording/types";
-import { BUILTIN_BACKGROUNDS, QUALITY_PRESETS } from "@/lib/recording/presets";
+import { ASPECT_RATIOS, BUILTIN_BACKGROUNDS, QUALITY_PRESETS } from "@/lib/recording/presets";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
@@ -40,6 +46,13 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { RecordingHUD } from "@/components/recorder/RecordingHUD";
 import { cn } from "@/lib/utils";
+import {
+  deleteBackgroundAsset,
+  getBackgroundAssetUrl,
+  listBackgroundAssets,
+  saveBackgroundAsset,
+  type BackgroundAssetMeta,
+} from "@/lib/recording/backgroundLibrary";
 
 const LAYOUTS: { id: LayoutPreset; label: string }[] = [
   { id: "floating", label: "Floating" },
@@ -50,6 +63,18 @@ const LAYOUTS: { id: LayoutPreset; label: string }[] = [
   { id: "screen-only", label: "Screen Only" },
   { id: "camera-only", label: "Camera Only" },
 ];
+
+/** Hints only — labels are pulled from the shared ASPECT_RATIOS table
+ * (also used by the export-time crop) so "Format" here and "Aspect ratio"
+ * on the export screen always agree on what "9:16" etc. actually means. */
+const ASPECT_HINTS: Record<AspectRatioId, string> = {
+  original: "Matches your screen/camera",
+  "16:9": "YouTube, landscape",
+  "9:16": "TikTok, Reels, Shorts, Stories",
+  "4:5": "Instagram feed",
+  "1:1": "Square post",
+};
+const ASPECT_ORDER: AspectRatioId[] = ["original", "16:9", "9:16", "4:5", "1:1"];
 
 const MODE_META: Record<SourceMode, { label: string; icon: typeof Monitor }> = {
   screen: { label: "Screen", icon: Monitor },
@@ -80,8 +105,11 @@ export function StudioScreen({
   onPause,
   onResume,
   onStop,
+  onMarkZoom,
   onRestart,
   onBack,
+  screenReady,
+  onRequestScreenPreview,
 }: {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   /** Actual compositor canvas resolution — matches the real captured
@@ -97,16 +125,31 @@ export function StudioScreen({
   onPause: () => void;
   onResume: () => void;
   onStop: () => void;
+  /** In-tab fallback for marking an intentional zoom moment — the floating
+   * Picture-in-Picture control (see pipControls.ts) is the primary way to
+   * do this while some other window has focus, but this stays reachable
+   * wherever that API isn't available. */
+  onMarkZoom: () => void;
   onRestart: () => void;
   onBack: () => void;
+  /** Whether a real screen source is already attached to the preview — lets
+   * every screen-related control (Layout, Format, Fit, Zoom/Pan) be tuned
+   * against real content before recording starts, not just discovered
+   * afterward. */
+  screenReady: boolean;
+  onRequestScreenPreview: () => void;
 }) {
   const settings = useRecorderStore((s) => s.settings);
   const error = useRecorderStore((s) => s.error);
   const capability = useRecorderStore((s) => s.capability);
   const updateFrame = useRecorderStore((s) => s.updateFrame);
+  const updateEnhance = useRecorderStore((s) => s.updateEnhance);
   const updateBackground = useRecorderStore((s) => s.updateBackground);
   const updateCamera = useRecorderStore((s) => s.updateCamera);
   const setLayout = useRecorderStore((s) => s.setLayout);
+  const setAspectRatio = useRecorderStore((s) => s.setAspectRatio);
+  const setScreenFitMode = useRecorderStore((s) => s.setScreenFitMode);
+  const updateScreenView = useRecorderStore((s) => s.updateScreenView);
   const setQuality = useRecorderStore((s) => s.setQuality);
   const setCursorVisible = useRecorderStore((s) => s.setCursorVisible);
   const updateAudio = useRecorderStore((s) => s.updateAudio);
@@ -116,6 +159,7 @@ export function StudioScreen({
   const showLayoutPicker = settings.mode === "both";
   const modeMeta = MODE_META[settings.mode];
   const waitingForCamera = showCamera && !cameraReady && !recording && !error;
+  const showScreenPicker = showScreen && !screenReady && !recording && !error && !waitingForCamera;
 
   return (
     <div className="flex min-h-screen flex-col lg:h-screen lg:flex-row">
@@ -148,6 +192,18 @@ export function StudioScreen({
                 <span className="text-xs font-medium">Waiting for camera access…</span>
               </div>
             )}
+            {showScreenPicker && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-xl bg-black/70 text-white/90">
+                <MonitorPlay className="h-6 w-6" strokeWidth={1.75} />
+                <span className="max-w-xs text-center text-xs font-medium">
+                  See your screen here before you record — Layout, Format, Fit, Zoom and Pan
+                  all preview against it live.
+                </span>
+                <Button size="sm" onClick={onRequestScreenPreview}>
+                  Choose what to share
+                </Button>
+              </div>
+            )}
             {recording && (
               <RecordingHUD
                 elapsedMs={elapsedMs}
@@ -155,6 +211,7 @@ export function StudioScreen({
                 onPause={onPause}
                 onResume={onResume}
                 onStop={onStop}
+                onMarkZoom={onMarkZoom}
               />
             )}
           </div>
@@ -194,6 +251,33 @@ export function StudioScreen({
               </span>
             </div>
 
+            <SidebarSection icon={MonitorSmartphone} title="Format">
+              <ToggleGroup
+                type="single"
+                value={settings.aspectRatio}
+                onValueChange={(v) => v && setAspectRatio(v as AspectRatioId)}
+                className="grid grid-cols-3"
+              >
+                {ASPECT_ORDER.map((id) => (
+                  <ToggleGroupItem key={id} value={id} title={ASPECT_HINTS[id]}>
+                    {id === "16:9" ? (
+                      <RectangleHorizontal />
+                    ) : id === "9:16" || id === "4:5" ? (
+                      <RectangleVertical />
+                    ) : id === "1:1" ? (
+                      <SquareIcon />
+                    ) : null}
+                    {ASPECT_RATIOS[id].label}
+                  </ToggleGroupItem>
+                ))}
+              </ToggleGroup>
+              <p className="mt-2 text-xs text-muted-foreground">
+                {ASPECT_HINTS[settings.aspectRatio]}
+                {settings.aspectRatio !== "original" &&
+                  " — recording itself is captured in this shape, not just cropped after."}
+              </p>
+            </SidebarSection>
+
             <SidebarSection icon={FrameIcon} title="Frame">
               <FrameControls
                 enabled={settings.frame.enabled}
@@ -206,11 +290,26 @@ export function StudioScreen({
             </SidebarSection>
 
             {showCamera && (
+              <SidebarSection icon={Sparkles} title="Clean-up">
+                <EnhanceControls
+                  enabled={settings.enhance.enabled}
+                  strength={settings.enhance.strength}
+                  brightness={settings.enhance.brightness}
+                  contrast={settings.enhance.contrast}
+                  saturation={settings.enhance.saturation}
+                  onChange={updateEnhance}
+                />
+              </SidebarSection>
+            )}
+
+            {showCamera && (
               <SidebarSection icon={Settings2} title="Background">
                 <BackgroundControls
                   mode={settings.background.mode}
                   blurStrength={settings.background.blurStrength}
                   builtinId={settings.background.builtinId}
+                  imageUrl={settings.background.imageUrl}
+                  videoUrl={settings.background.videoUrl}
                   onChange={updateBackground}
                 />
               </SidebarSection>
@@ -238,11 +337,26 @@ export function StudioScreen({
                   onValueChange={(v) => v && setLayout(v as LayoutPreset)}
                   className="grid grid-cols-2"
                 >
-                  {LAYOUTS.map((l) => (
-                    <ToggleGroupItem key={l.id} value={l.id}>
-                      {l.label}
-                    </ToggleGroupItem>
-                  ))}
+                  {LAYOUTS.map((l) => {
+                    // Left/right halves of a portrait or square canvas are
+                    // two unusably narrow slivers — steer toward "Split"
+                    // (screen on top, camera below) for those formats
+                    // instead, which is what setAspectRatio already
+                    // switches to automatically.
+                    const portraitish = settings.aspectRatio !== "original" && settings.aspectRatio !== "16:9";
+                    const disabled = l.id === "side-by-side" && portraitish;
+                    return (
+                      <ToggleGroupItem
+                        key={l.id}
+                        value={l.id}
+                        disabled={disabled}
+                        title={disabled ? "Not available for portrait/square formats — try Split instead" : undefined}
+                        className={cn(disabled && "pointer-events-none opacity-40")}
+                      >
+                        {l.label}
+                      </ToggleGroupItem>
+                    );
+                  })}
                 </ToggleGroup>
               </SidebarSection>
             )}
@@ -267,13 +381,99 @@ export function StudioScreen({
 
             {showScreen && (
               <SidebarSection icon={MonitorPlay} title="Screen">
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="cursor-visible">Show cursor</Label>
-                  <Switch
-                    id="cursor-visible"
-                    checked={settings.cursor.visible}
-                    onCheckedChange={setCursorVisible}
-                  />
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="cursor-visible">Show cursor</Label>
+                    <Switch
+                      id="cursor-visible"
+                      checked={settings.cursor.visible}
+                      onCheckedChange={setCursorVisible}
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <Label>Fit</Label>
+                    <ToggleGroup
+                      type="single"
+                      value={settings.screenFitMode}
+                      onValueChange={(v) => v && setScreenFitMode(v as RecordingSettings["screenFitMode"])}
+                      className="grid grid-cols-3"
+                    >
+                      <ToggleGroupItem value="auto" title="Fill a portrait/square frame, show the whole screen in a landscape one">
+                        Auto
+                      </ToggleGroupItem>
+                      <ToggleGroupItem value="contain" title="Always show the entire screen — may letterbox">
+                        Full
+                      </ToggleGroupItem>
+                      <ToggleGroupItem value="cover" title="Always fill the frame — crops the screen's edges">
+                        Fill
+                      </ToggleGroupItem>
+                    </ToggleGroup>
+                    <p className="text-xs text-muted-foreground">
+                      {settings.screenFitMode === "cover"
+                        ? "Screen recording fills its frame edge to edge, cropping the sides."
+                        : settings.screenFitMode === "contain"
+                          ? "Entire screen always visible — letterboxes in a portrait/square format."
+                          : "Fills a portrait/square format like a real mobile screen recording; shows the whole screen when landscape."}
+                    </p>
+                  </div>
+
+                  {settings.screenFitMode !== "contain" && (
+                    <div className="space-y-3 border-t border-border/70 pt-3">
+                      <div className="space-y-1.5">
+                        <Label>Zoom</Label>
+                        <Slider
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          value={[settings.screenView.zoom]}
+                          onValueChange={([v]) => updateScreenView({ zoom: v })}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Left fills the frame tighter (crops more); right zooms out to show
+                          more of your screen (letterboxes instead of cropping).
+                        </p>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <Label>Pan horizontal</Label>
+                        <Slider
+                          min={-1}
+                          max={1}
+                          step={0.01}
+                          value={[settings.screenView.panX]}
+                          onValueChange={([v]) => updateScreenView({ panX: v })}
+                        />
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <Label>Pan vertical</Label>
+                        <Slider
+                          min={-1}
+                          max={1}
+                          step={0.01}
+                          value={[settings.screenView.panY]}
+                          onValueChange={([v]) => updateScreenView({ panY: v })}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Pan only matters while zoomed in — it has nothing left to move once
+                          Zoom shows the whole screen.
+                        </p>
+                      </div>
+
+                      {(settings.screenView.zoom !== 0 ||
+                        settings.screenView.panX !== 0 ||
+                        settings.screenView.panY !== 0) && (
+                        <button
+                          type="button"
+                          onClick={() => updateScreenView({ zoom: 0, panX: 0, panY: 0 })}
+                          className="text-xs text-accent hover:underline"
+                        >
+                          Reset zoom &amp; pan
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               </SidebarSection>
             )}
@@ -402,6 +602,174 @@ function FrameControls({
   );
 }
 
+/** Real-time denoise/sharpen/color pass applied to the raw camera feed —
+ * see EnhanceSettings in types.ts for what it can and can't do. On by
+ * default at a mild strength since most built-in webcams benefit from it
+ * out of the box. */
+function EnhanceControls({
+  enabled,
+  strength,
+  brightness,
+  contrast,
+  saturation,
+  onChange,
+}: {
+  enabled: boolean;
+  strength: number;
+  brightness: number;
+  contrast: number;
+  saturation: number;
+  onChange: (partial: Partial<RecordingSettings["enhance"]>) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <Label htmlFor="enhance-enabled">Clean up webcam</Label>
+        <Switch id="enhance-enabled" checked={enabled} onCheckedChange={(v) => onChange({ enabled: v })} />
+      </div>
+
+      {enabled && (
+        <>
+          <div className="space-y-1.5">
+            <Label>Sharpen + denoise</Label>
+            <Slider
+              min={0}
+              max={1}
+              step={0.05}
+              value={[strength]}
+              onValueChange={([v]) => onChange({ strength: v })}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Brightness</Label>
+            <Slider
+              min={0.8}
+              max={1.3}
+              step={0.02}
+              value={[brightness]}
+              onValueChange={([v]) => onChange({ brightness: v })}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Contrast</Label>
+            <Slider
+              min={0.8}
+              max={1.3}
+              step={0.02}
+              value={[contrast]}
+              onValueChange={([v]) => onChange({ contrast: v })}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Color pop</Label>
+            <Slider
+              min={0.8}
+              max={1.4}
+              step={0.02}
+              value={[saturation]}
+              onValueChange={([v]) => onChange({ saturation: v })}
+            />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Upload + "saved on this device" picker shared by the Image and Video
+ * background modes. Every upload is written into the IndexedDB-backed
+ * library (backgroundLibrary.ts) as well as used immediately, so the next
+ * time a background is needed it's a click away instead of a re-upload —
+ * nothing here leaves the device, same as the rest of the app. */
+function BackgroundLibraryPicker({
+  kind,
+  onSelect,
+}: {
+  kind: "image" | "video";
+  onSelect: (picked: { url: string; name: string }) => void;
+}) {
+  const [assets, setAssets] = React.useState<BackgroundAssetMeta[]>([]);
+  const [saving, setSaving] = React.useState(false);
+
+  const refresh = React.useCallback(() => {
+    void listBackgroundAssets().then((all) => setAssets(all.filter((a) => a.kind === kind)));
+  }, [kind]);
+
+  React.useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const handleFile = async (file: File) => {
+    // Use it immediately — saving to the library shouldn't gate picking it.
+    onSelect({ url: URL.createObjectURL(file), name: file.name });
+    setSaving(true);
+    await saveBackgroundAsset(kind, file, file.name);
+    setSaving(false);
+    refresh();
+  };
+
+  const handlePick = async (asset: BackgroundAssetMeta) => {
+    const loaded = await getBackgroundAssetUrl(asset.id);
+    if (loaded) onSelect({ url: loaded.url, name: asset.name });
+  };
+
+  const handleDelete = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    await deleteBackgroundAsset(id);
+    refresh();
+  };
+
+  return (
+    <div className="space-y-2">
+      <label className="flex cursor-pointer items-center justify-center rounded-md border border-dashed border-border py-4 text-xs text-muted-foreground hover:border-accent hover:text-foreground">
+        {saving ? "Saving…" : `Upload ${kind}`}
+        <input
+          type="file"
+          accept={kind === "image" ? "image/png,image/jpeg,image/webp" : "video/mp4,video/webm,video/quicktime"}
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void handleFile(file);
+            e.target.value = "";
+          }}
+        />
+      </label>
+
+      {assets.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Saved on this device</p>
+          <div className="grid grid-cols-3 gap-2">
+            {assets.map((asset) => (
+              <button
+                key={asset.id}
+                type="button"
+                onClick={() => void handlePick(asset)}
+                title={asset.name}
+                className="group relative flex h-14 flex-col items-center justify-center gap-1 rounded-md border-2 border-transparent bg-muted/40 px-1 text-center transition-colors hover:border-accent"
+              >
+                {kind === "image" ? (
+                  <ImageIcon className="h-3.5 w-3.5 text-muted-foreground" />
+                ) : (
+                  <VideoIcon className="h-3.5 w-3.5 text-muted-foreground" />
+                )}
+                <span className="w-full truncate px-1 text-[9px] text-muted-foreground">{asset.name}</span>
+                <span
+                  role="button"
+                  onClick={(e) => void handleDelete(e, asset.id)}
+                  className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-background text-muted-foreground shadow group-hover:flex hover:text-foreground"
+                  title="Remove from library"
+                >
+                  <XIcon className="h-2.5 w-2.5" />
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BackgroundControls({
   mode,
   blurStrength,
@@ -411,6 +779,8 @@ function BackgroundControls({
   mode: BackgroundMode;
   blurStrength: "light" | "medium" | "strong";
   builtinId: string | null;
+  imageUrl: string | null;
+  videoUrl: string | null;
   onChange: (partial: Partial<RecordingSettings["background"]>) => void;
 }) {
   return (
@@ -419,12 +789,13 @@ function BackgroundControls({
           type="single"
           value={mode}
           onValueChange={(v) => v && onChange({ mode: v as BackgroundMode })}
-          className="grid grid-cols-4"
+          className="grid grid-cols-5"
         >
           <ToggleGroupItem value="none">None</ToggleGroupItem>
           <ToggleGroupItem value="blur">Blur</ToggleGroupItem>
           <ToggleGroupItem value="builtin">Preset</ToggleGroupItem>
           <ToggleGroupItem value="image">Image</ToggleGroupItem>
+          <ToggleGroupItem value="video">Video</ToggleGroupItem>
         </ToggleGroup>
 
         {mode === "blur" && (
@@ -458,18 +829,11 @@ function BackgroundControls({
         )}
 
         {mode === "image" && (
-          <label className="flex cursor-pointer items-center justify-center rounded-md border border-dashed border-border py-4 text-xs text-muted-foreground hover:border-accent hover:text-foreground">
-            Upload image
-            <input
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) onChange({ imageUrl: URL.createObjectURL(file) });
-              }}
-            />
-          </label>
+          <BackgroundLibraryPicker kind="image" onSelect={({ url }) => onChange({ imageUrl: url })} />
+        )}
+
+        {mode === "video" && (
+          <BackgroundLibraryPicker kind="video" onSelect={({ url }) => onChange({ videoUrl: url })} />
         )}
       </div>
   );

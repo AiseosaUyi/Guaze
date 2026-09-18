@@ -1,13 +1,243 @@
 # TODOs
 
-## 🔴 OPEN — Export re-encode pipeline produces an undecodable video (0×0, never plays)
+## 🟢 SHIPPED — Screen preview during setup (see the real view before recording)
+
+**Where:** `components/recorder/RecorderApp.tsx` (`screenReady` state,
+`requestScreenPreview`), `components/recorder/StudioScreen.tsx`
+(`showScreenPicker`, "Choose what to share" overlay, `screenReady` /
+`onRequestScreenPreview` props).
+
+**Why:** direct feedback — "the zoom the pan etc are only useful when
+actually recording not before as before i dont even get to see how the
+view i would be looking at is." Zoom/Pan/Fit/Layout/Format were all wired
+up correctly, but during setup the Screen box in the studio preview showed
+nothing real (no screen-share stream exists until recording starts), so
+there was no way to judge or tune the composition ahead of time — only the
+camera preview was live.
+
+**What changed:** a "Choose what to share" overlay now appears over the
+Screen box during setup whenever Screen or Screen + Camera mode is
+selected and no screen source has been picked yet (mirrors the existing
+"waiting for camera" overlay's styling/pattern). Clicking it calls
+`getDisplayMedia()` on that user gesture (screen sharing, unlike camera,
+can't be requested automatically on mount) and, once granted, feeds the
+live stream into the same preview/compositor path used during actual
+recording — so Zoom, Pan, Fit, Layout, and Format can all be tuned against
+the real screen content before hitting record. A listener on the shared
+track's "ended" event (fired if the user stops sharing via Chrome's own
+sharing bar) resets back to the picker overlay. State resets on stop
+recording, start over, and back-to-setup so re-entering setup always
+re-prompts rather than reusing a stale stream.
+
+Verified with `tsc --noEmit` / `eslint` (clean, both files). Not yet
+confirmed live end-to-end — `getDisplayMedia()`'s picker is a native
+browser-chrome dialog outside the page, so browser automation can show the
+overlay and trigger the picker but can't complete the OS-level selection
+itself; needs a real click-through in the user's own browser.
+
+## 🟢 SHIPPED — Zoom-editor discoverability: inline how-to hint text
+
+**Where:** `components/recorder/ZoomEditor.tsx` (`ZoomTimeline`).
+
+**Why:** direct feedback — "im not sure how this click to zoom in on a
+place works its not very noticeable maybe a tutorial work through / demo
+instailled for new users." The zoom-keyframe editor on the export screen
+had no explanation of what to do first; a first-time user had to guess
+that "Add zoom at playhead" plus dragging the resulting box/handles was
+the whole interaction.
+
+**What changed:** a short `text-xs text-muted-foreground` line right under
+the "Zoom" header, with three states depending on what's on the timeline:
+no keyframes yet → explains scrubbing to a moment and clicking "Add zoom
+at playhead"; keyframes exist but none selected → "Click a segment below
+to select it and edit its position, size, or timing"; a keyframe selected
+→ explains dragging the highlighted box to move it, a corner to resize it,
+and its block below to retime it. Scoped deliberately small (inline text,
+not a new onboarding system) since the user's phrasing floated a tutorial/
+demo as a maybe, not a firm ask — worth revisiting as a fuller walkthrough
+if the inline hint isn't enough in practice.
+
+Verified with `tsc --noEmit` / `eslint` (clean). Not yet tested live.
+
+## 🟢 SHIPPED — Fix "failed encoding" export error (MP4→WebM automatic fallback)
+
+**Where:** `lib/recording/exporter.ts` (`runAttempt` extraction, retry
+flow), `components/recorder/ExportScreen.tsx` (`fallbackNotice`).
+
+**Why:** reported directly — "also download isnt working its telling me
+failed encoding" — a hard blocker on the core download feature, hit while
+investigating the feedback above. Reproduced live: exporting as MP4 threw
+during `recorder.start()`.
+
+**What changed:** `recorder.onerror` now surfaces the real
+`DOMException` (name + message) instead of a generic string, which is how
+the actual root cause was found: `EncodingError — Encoder initialization
+failed` — a genuine Chromium bug where `MediaRecorder.isTypeSupported()`
+reports an MP4/H.264 codec as supported while the encoder still fails to
+initialize at runtime for a canvas+WebAudio stream. There's no reliable
+way to pre-check this, so the fix is a retry: the MediaRecorder run/draw
+loop was extracted into `runAttempt(format)`, and if the first attempt is
+MP4 and fails with an encoding-related error, it automatically retries as
+WebM — reusing the same `AudioContext`/`MediaStreamAudioDestinationNode`
+(since `createMediaElementSource` can only be called once per video
+element) and rewinding the source video before replaying. `ExportScreen`
+now shows a plain-language notice when the delivered file isn't the
+format that was requested ("Your browser couldn't encode MP4 here, so
+this downloaded as WebM instead — plays the same everywhere, just a
+different container.").
+
+Verified live end-to-end in the user's own browser: MP4 export fails,
+falls back automatically, downloads as WebM, notice renders. This is the
+one item in this batch confirmed working start to finish, not just
+compiled/rendered.
+
+
+## 🟢 SHIPPED — Zoom/pan control on top of the screen "Fill" crop
+
+**Where:** `lib/recording/types.ts` (`RecordingSettings.screenView`),
+`lib/store/useRecorderStore.ts` (`updateScreenView`), `lib/recording/compositor.ts`
+(`zoomedCoverFit()`, wired into `drawScreen`'s cover branch),
+`components/recorder/StudioScreen.tsx` (Zoom / Pan horizontal / Pan vertical
+sliders under Screen > Fit).
+
+**Why:** the "Fill" crop (previous entry) uses `coverFitSource`'s centered
+tightest crop, which for a wide landscape screen composited into a narrow
+9:16 canvas keeps only a thin vertical sliver of the screen's width —
+confirmed directly from the user's own recording: browser text was cropped
+down to a few words per line, "not very usable." Switching to "Full"
+(contain) fixes readability but reintroduces the letterboxing the Fill
+feature existed to avoid — there was no middle ground.
+
+**What changed:** `zoomedCoverFit()` blends continuously between the
+tightest cover crop (zoom 0, current default, unchanged) and full contain
+(zoom 1, entire screen visible, letterboxed) with no distortion at any
+point in between — it always draws the cropped region at its own true
+aspect ratio via `containFitDest` rather than stretching it to fill the
+box, so a partial zoom is a partial letterbox, never a warped picture. Pan
+(horizontal/vertical, -1..1) shifts which part of the source the crop
+window is centered on, and is a no-op once zoom reaches 1 (nothing left to
+shift). Exposed as three sliders under Screen > Fit, shown whenever fit
+isn't forced to "contain". A "Reset zoom & pan" link appears once either
+has moved from its 0 default.
+
+Verified with `tsc --noEmit` / `eslint` (clean) and live in the browser —
+the sliders render, move, and update store state with no console errors.
+Could not visually confirm the actual crop changing on real screen content
+in this pass, same `getDisplayMedia` picker limitation noted in the prior
+entry; worth a real check dragging Zoom while screen-sharing.
+
+## 🟢 SHIPPED — Screen recording fills the frame in portrait/square formats
+
+**Where:** `lib/recording/types.ts` (`RecordingSettings.screenFitMode`),
+`lib/store/useRecorderStore.ts` (`setScreenFitMode`), `lib/recording/compositor.ts`
+(`drawScreen`'s new `fit` param + `coverFitSource` branch, `effectiveScreenFit()`),
+`components/recorder/StudioScreen.tsx` (new "Fit" control under Screen).
+
+**Why:** the live-portrait-format feature above still drew the screen source
+with `containFitDest` (whole-screen, letterboxed) everywhere, including the
+full-bleed Floating/PiP/Screen-Only layouts and Split's top block. In a 9:16
+canvas that meant a small landscape rectangle centered in a mostly-black
+frame — not the "screen recording fills my phone screen" look every
+reference mobile-tutorial video actually has (camera small circle top
+corner, screen content edge-to-edge). Flagged as a known gap in the prior
+entry; this is the fix, from a direct screenshot comparison against a
+reference TikTok video.
+
+**What changed:** new `screenFitMode: "auto" | "contain" | "cover"` setting,
+"Fit" control in the Screen sidebar section. "Auto" (default) crops the
+screen source to fill (`coverFitSource`, the same function already proven
+correct for the camera layer) whenever its box is portrait/near-square —
+i.e. whenever that's the shape a mobile-social recording's screen block
+actually is — and keeps the original whole-screen letterboxed behavior in
+a landscape box, so nothing changes for existing 16:9 users. "Full" and
+"Fill" force whole-screen or always-crop respectively, for anyone who needs
+every pixel of their screen guaranteed visible (code demos, spreadsheets)
+or wants edge-to-edge regardless of format.
+
+Verified with `tsc --noEmit` / `eslint` (clean). Could not visually verify
+the actual crop live — `getDisplayMedia()`'s screen/window picker is a
+native browser-chrome dialog outside the page, not something browser
+automation can click through, so starting a Screen + Camera take from this
+pass throws (an `InvalidStateError` from the unresolved picker, unrelated
+to this change — confirmed by grepping the source, the string isn't ours).
+The underlying crop math is identical to `drawCameraLayer`'s, which *was*
+confirmed live (camera fills a 9:16 canvas edge to edge with no gaps) in
+the prior entry. Worth a real screen-share take to confirm end to end.
+
+## 🟢 SHIPPED — Live mobile/vertical (portrait) recording format
+
+**Where:** `lib/recording/types.ts` (`RecordingSettings.aspectRatio`),
+`lib/store/useRecorderStore.ts` (`setAspectRatio`), `lib/recording/presets.ts`
+(`computeEffectiveDims` now takes an optional `forcedAspect`),
+`components/recorder/RecorderApp.tsx` (`applyCanvasDims`),
+`components/recorder/StudioScreen.tsx` (new "Format" sidebar section),
+`lib/recording/compositor.ts` (`drawBoth`'s "split" layout).
+
+**What changed:** aspect ratio used to only exist as a post-recording export
+crop (`ExportScreen`'s "Aspect ratio" picker, always cropping a landscape
+take). There was no way to actually *record* in a mobile/vertical shape for
+Twitter, IG, TikTok, Reels, Shorts, etc. — screen + camera were always
+composited into a landscape canvas live, then cropped after.
+
+Added a live "Format" control (Original / 16:9 / 9:16 / 4:5 / 1:1) in the
+Studio sidebar, above Frame. Picking a non-"original" ratio now forces the
+*live compositor canvas itself* into that shape (`computeEffectiveDims`'s new
+`forcedAspect` param takes priority over the auto-detected screen aspect),
+so the actual `MediaRecorder` output is already the right shape — not a
+crop applied afterward. Camera-only and the floating/PiP camera bubble
+already cover-fit into any box, so they look native in portrait with no
+changes. The "Split" layout (screen top / camera bottom — the standard
+vertical tutorial/reaction format) now uses a 62/38 top/bottom split
+instead of 50/50 when the canvas is portrait, so the screen content gets
+the room it needs and the camera reads as a reaction band, not equal
+billing. "Side by Side" doesn't make sense in a narrow portrait canvas
+(two slivers), so it's disabled in the Layout picker whenever the chosen
+format is portrait/square, and `setAspectRatio` auto-switches an
+already-selected Side-by-Side over to Split so the user never gets stuck
+on a layout that just broke.
+
+The zoom-keyframe ("click and zoom") editor on the export screen needed
+**no changes** — it already maps its rectangle to the video element's own
+bounding box in normalized 0..1 space, so it works correctly on portrait
+footage automatically.
+
+Verified with `tsc --noEmit` / `eslint` (both clean) and live in the real
+browser via `npm run dev`: switched to 9:16 in Camera mode (canvas actually
+went portrait, camera cover-filled it edge to edge), switched to Screen +
+Camera with Split (screen block on top ~62%, camera band on bottom ~38%,
+both full-width), confirmed Side-by-Side greys out in portrait, and did a
+real short recording + export-screen check — the downloaded take's own
+`<video>` element reported portrait dimensions (not just the live preview),
+and the zoom rectangle overlay tracked it correctly.
+
+## 🟢 RESOLVED — Export re-encode pipeline produces an undecodable video (0×0, never plays)
 
 **Where:** `lib/recording/exporter.ts`, `exportRecording()` — the "Export Video"
 button on the review screen (`components/recorder/ExportScreen.tsx`).
 
-**Status:** Confirmed real, pre-existing, not yet root-caused. Blocks the
-entire export feature (quality/format/aspect conversion), not just the zoom
-editor. **Not** caused by the zoom-keyframe feature — see isolation repro below.
+**Status:** Confirmed real, pre-existing. Blocks the entire export feature
+(quality/format/aspect conversion), not just the zoom editor. **Not** caused
+by the zoom-keyframe feature — see isolation repro below.
+
+**Fix applied (see `lib/recording/exporter.ts`):** root cause matched
+"not yet tested" step 1 below. `exportRecording()` was combining a
+`canvas.captureStream()` video track with an audio track pulled from a
+*separate* `video.captureStream()` call into one `MediaStream` fed to a
+single `MediaRecorder` — the known-flaky "mixed-source tracks in one
+MediaRecorder" Chromium combo named in that step. Replaced the audio route
+with a `MediaStreamAudioDestinationNode` fed by `createMediaElementSource`
+(the standard reliable pattern for canvas + `<video>`-audio recording),
+so the recorder only ever sees a canvas-native video track plus a
+Web-Audio-native audio track, never two independently-captured streams.
+One behavior change worth knowing: `createMediaElementSource` takes over
+the element's audio output, so export now re-encodes silently instead of
+audibly playing the take back while it processes.
+
+Verified with `tsc --noEmit` and `eslint` (both clean). Could not run
+`next build` or exercise this live in a browser from this pass — worth
+a real `npm run dev` / export-button click-through to confirm the fix
+holds outside static checks, same as the rest of this file already flags
+for anything touching this pipeline.
 
 ### Symptom
 

@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
-import { ZoomRegionOverlay, ZoomTimeline } from "@/components/recorder/ZoomEditor";
+import { SmartCameraPanel, ZoomRegionOverlay, ZoomTimeline } from "@/components/recorder/ZoomEditor";
 import { formatDuration } from "@/lib/utils";
 
 export function ExportScreen({
@@ -28,9 +28,11 @@ export function ExportScreen({
   const [aspect, setAspect] = React.useState<AspectRatioId>("original");
   const [exporting, setExporting] = React.useState(false);
   const [progress, setProgress] = React.useState(0);
+  const [progressPhase, setProgressPhase] = React.useState<"recording" | "transcoding">("recording");
   const [exportedUrl, setExportedUrl] = React.useState<string | null>(null);
   const [exportedName, setExportedName] = React.useState("");
   const [exportError, setExportError] = React.useState<string | null>(null);
+  const [fallbackNotice, setFallbackNotice] = React.useState<string | null>(null);
   const [selectedZoomId, setSelectedZoomId] = React.useState<string | null>(null);
   const [videoAspect, setVideoAspect] = React.useState<number | null>(null);
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
@@ -48,7 +50,9 @@ export function ExportScreen({
   async function handleExport() {
     setExporting(true);
     setExportError(null);
+    setFallbackNotice(null);
     setProgress(0);
+    setProgressPhase("recording");
     try {
       const dims = resolveQualityDims(quality, {
         width: 1920,
@@ -56,7 +60,7 @@ export function ExportScreen({
         fps: 30,
         videoBitsPerSecond: 6_000_000,
       });
-      const { blob, fileExtension } = await exportRecording({
+      const { blob, fileExtension, outcome } = await exportRecording({
         sourceBlob: result!.blob,
         width: dims.width,
         height: dims.height,
@@ -65,7 +69,10 @@ export function ExportScreen({
         format,
         aspect,
         zoomKeyframes,
-        onProgress: setProgress,
+        onProgress: (fraction, phase) => {
+          setProgress(fraction);
+          if (phase) setProgressPhase(phase);
+        },
       });
       const url = URL.createObjectURL(blob);
       setExportedUrl((prev) => {
@@ -73,6 +80,19 @@ export function ExportScreen({
         return url;
       });
       setExportedName(`recording-${Date.now()}.${fileExtension}`);
+      if (outcome === "transcoded-to-mp4") {
+        // exportRecording() had to fall back to a slower client-side
+        // transcode (ffmpeg.wasm) because this browser's own MP4 encoder
+        // can't initialize for this stream — the delivered file IS a real
+        // MP4, just worth explaining why export took longer than usual.
+        setFallbackNotice(
+          `This browser can't record MP4 directly here, so it was converted to a real MP4 after recording — that's why export took a bit longer.`
+        );
+      } else if (outcome === "webm-fallback") {
+        setFallbackNotice(
+          `Your browser couldn't encode MP4 here, and the backup MP4 conversion failed too, so this downloaded as WebM instead — plays the same everywhere, just a different container.`
+        );
+      }
     } catch (err) {
       setExportError(err instanceof Error ? err.message : "Export failed.");
     } finally {
@@ -109,10 +129,11 @@ export function ExportScreen({
               <ZoomRegionOverlay
                 videoRef={videoRef}
                 keyframe={selectedZoom}
-                onChange={(rect) => updateZoomKeyframe(selectedZoom.id, { rect })}
+                onChange={(rect) => updateZoomKeyframe(selectedZoom.id, { rect, source: "manual" })}
               />
             )}
           </div>
+          <SmartCameraPanel hasActivity={!!result.activitySamples?.length} />
           <ZoomTimeline
             videoRef={videoRef}
             durationMs={result.durationMs}
@@ -184,15 +205,18 @@ export function ExportScreen({
             </div>
 
             {exportError && <p className="text-xs text-danger">{exportError}</p>}
+            {fallbackNotice && <p className="text-xs text-muted-foreground">{fallbackNotice}</p>}
 
             {!exportedUrl ? (
               <Button className="w-full" onClick={() => void handleExport()} disabled={exporting}>
-                {exporting ? `Exporting… ${Math.round(progress * 100)}%` : "Export Video"}
+                {exporting
+                  ? `${progressPhase === "transcoding" ? "Converting to MP4" : "Exporting"}… ${Math.round(progress * 100)}%`
+                  : "Export Video"}
               </Button>
             ) : (
               <Button className="w-full" asChild>
                 <a href={exportedUrl} download={exportedName}>
-                  <Download /> Download {exportedName}
+                  <Download /> Download recording
                 </a>
               </Button>
             )}

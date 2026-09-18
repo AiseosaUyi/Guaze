@@ -1,10 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { Plus, Trash2, ZoomIn } from "lucide-react";
+import { Plus, RefreshCw, RotateCcw, Sparkles, Trash2, ZoomIn } from "lucide-react";
 import { useRecorderStore } from "@/lib/store/useRecorderStore";
 import type { ZoomKeyframe } from "@/lib/recording/types";
+import { findZoomGapAt, zoomFactorForIntensity } from "@/lib/recording/smartCamera";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
 import { cn, formatDuration } from "@/lib/utils";
 
 export const MIN_KEYFRAME_MS = 400;
@@ -16,14 +20,12 @@ function makeId() {
   return `zoom-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-export function findZoomGapAt(keyframes: ZoomKeyframe[], durationMs: number, ms: number) {
-  const sorted = [...keyframes].sort((a, b) => a.startMs - b.startMs);
-  let start = 0;
-  for (const kf of sorted) {
-    if (ms < kf.startMs) return ms >= start ? { start, end: kf.startMs } : null;
-    start = kf.endMs;
-  }
-  return ms >= start ? { start, end: durationMs } : null;
+/** Same centered-square sizing Smart Camera itself uses at a given
+ * intensity — what "Reset" on a keyframe puts it back to. */
+function defaultRectForIntensity(intensity: number): ZoomKeyframe["rect"] {
+  const size = 1 / zoomFactorForIntensity(intensity);
+  const offset = (1 - size) / 2;
+  return { x: offset, y: offset, w: size, h: size };
 }
 
 /** The draggable/resizable rectangle for the currently selected keyframe,
@@ -146,6 +148,7 @@ export function ZoomTimeline({
   const addZoomKeyframe = useRecorderStore((s) => s.addZoomKeyframe);
   const updateZoomKeyframe = useRecorderStore((s) => s.updateZoomKeyframe);
   const removeZoomKeyframe = useRecorderStore((s) => s.removeZoomKeyframe);
+  const smartCameraIntensity = useRecorderStore((s) => s.smartCameraIntensity);
 
   const [playheadMs, setPlayheadMs] = React.useState(0);
   const timelineRef = React.useRef<HTMLDivElement | null>(null);
@@ -179,7 +182,7 @@ export function ZoomTimeline({
     const startMs = atMs;
     const endMs = Math.min(gap.end, startMs + DEFAULT_HOLD_MS);
     const id = makeId();
-    addZoomKeyframe({ id, startMs, endMs, rect: DEFAULT_RECT });
+    addZoomKeyframe({ id, startMs, endMs, rect: DEFAULT_RECT, source: "manual" });
     onSelect(id);
     video?.pause();
   }
@@ -213,13 +216,13 @@ export function ZoomTimeline({
     if (d.mode === "move") {
       const length = d.endMs - d.startMs;
       const newStart = Math.max(prevEnd, Math.min(nextStart - length, d.startMs + deltaMs));
-      updateZoomKeyframe(d.id, { startMs: newStart, endMs: newStart + length });
+      updateZoomKeyframe(d.id, { startMs: newStart, endMs: newStart + length, source: "manual" });
     } else if (d.mode === "resize-left") {
       const newStart = Math.max(prevEnd, Math.min(d.endMs - MIN_KEYFRAME_MS, d.startMs + deltaMs));
-      updateZoomKeyframe(d.id, { startMs: newStart });
+      updateZoomKeyframe(d.id, { startMs: newStart, source: "manual" });
     } else {
       const newEnd = Math.min(nextStart, Math.max(d.startMs + MIN_KEYFRAME_MS, d.endMs + deltaMs));
-      updateZoomKeyframe(d.id, { endMs: newEnd });
+      updateZoomKeyframe(d.id, { endMs: newEnd, source: "manual" });
     }
   }
 
@@ -247,6 +250,14 @@ export function ZoomTimeline({
         </Button>
       </div>
 
+      <p className="text-xs text-muted-foreground">
+        {selected
+          ? "Drag the highlighted box on the video above to move it, drag a corner to resize it, and drag its block below to change when it happens."
+          : zoomKeyframes.length === 0
+            ? "Play or scrub the video to the moment you want to punch in on, then click “Add zoom at playhead.” It adds a zoomed-in segment there that you can then drag to reposition and resize."
+            : "Click a segment below to select it and edit its position, size, or timing."}
+      </p>
+
       <div
         ref={timelineRef}
         onPointerMove={onTimelinePointerMove}
@@ -261,11 +272,14 @@ export function ZoomTimeline({
             onPointerMove={onTimelinePointerMove}
             onPointerUp={onTimelinePointerUp}
             onClick={(e) => e.stopPropagation()}
+            title={kf.source === "auto" ? "Smart Camera" : "Manual zoom"}
             className={cn(
               "absolute top-1 bottom-1 cursor-grab rounded border transition-colors",
               kf.id === selectedId
                 ? "border-accent bg-accent/70"
-                : "border-accent/40 bg-accent/30 hover:bg-accent/40"
+                : kf.source === "auto"
+                  ? "border-accent/30 bg-accent/20 hover:bg-accent/30"
+                  : "border-accent/40 bg-accent/30 hover:bg-accent/40"
             )}
             style={{
               left: durationMs > 0 ? `${(kf.startMs / durationMs) * 100}%` : "0%",
@@ -297,19 +311,105 @@ export function ZoomTimeline({
 
       {selected && (
         <div className="flex items-center justify-between rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
-          <span>
+          <span className="flex items-center gap-1.5">
+            {selected.source === "auto" && (
+              <span title="Placed by Smart Camera" className="flex items-center gap-1 text-accent">
+                <Sparkles className="h-3 w-3" />
+              </span>
+            )}
             {formatDuration(selected.startMs)} – {formatDuration(selected.endMs)}
           </span>
-          <button
-            type="button"
-            onClick={() => {
-              removeZoomKeyframe(selected.id);
-              onSelect(null);
-            }}
-            className="flex items-center gap-1 text-danger hover:opacity-80"
-          >
-            <Trash2 className="h-3.5 w-3.5" /> Remove
-          </button>
+          <span className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() =>
+                updateZoomKeyframe(selected.id, {
+                  rect: defaultRectForIntensity(smartCameraIntensity),
+                  source: "manual",
+                })
+              }
+              className="flex items-center gap-1 hover:text-foreground"
+              title="Reset position and zoom amount"
+            >
+              <RotateCcw className="h-3.5 w-3.5" /> Reset
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                removeZoomKeyframe(selected.id);
+                onSelect(null);
+              }}
+              className="flex items-center gap-1 text-danger hover:opacity-80"
+            >
+              <Trash2 className="h-3.5 w-3.5" /> Remove
+            </button>
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Global Smart Camera controls — on/off + intensity + a manual re-run.
+ * Rendered above `ZoomTimeline`, whose auto-detected blocks (Sparkles-marked
+ * in the selected-keyframe bar above) this panel's toggle/slider populate or
+ * clear. Disabled entirely when the take has no screen motion samples to
+ * work with (camera-only recordings). */
+export function SmartCameraPanel({ hasActivity }: { hasActivity: boolean }) {
+  const enabled = useRecorderStore((s) => s.smartCameraEnabled);
+  const intensity = useRecorderStore((s) => s.smartCameraIntensity);
+  const setEnabled = useRecorderStore((s) => s.setSmartCameraEnabled);
+  const setIntensity = useRecorderStore((s) => s.setSmartCameraIntensity);
+  const regenerate = useRecorderStore((s) => s.regenerateSmartCamera);
+  const autoCount = useRecorderStore((s) => s.zoomKeyframes.filter((k) => k.source === "auto").length);
+
+  return (
+    <div className="w-full max-w-3xl space-y-3 rounded-md border border-border bg-surface p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Sparkles className="h-3.5 w-3.5 text-accent" />
+          <div>
+            <Label htmlFor="smart-camera">Smart Camera</Label>
+            <p className="text-[11px] text-muted-foreground">
+              {hasActivity
+                ? "Automatically zooms and pans to follow clicks and typing — scrolling stays smooth and steady."
+                : "No screen activity was recorded in this take, so there's nothing to detect."}
+            </p>
+          </div>
+        </div>
+        <Switch
+          id="smart-camera"
+          checked={enabled}
+          disabled={!hasActivity}
+          onCheckedChange={setEnabled}
+        />
+      </div>
+
+      {enabled && hasActivity && (
+        <div className="space-y-2 pt-1">
+          <div className="flex items-center justify-between">
+            <Label>Movement intensity</Label>
+            <button
+              type="button"
+              onClick={() => regenerate()}
+              className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+              title="Re-run detection (keeps any zooms you've hand-edited)"
+            >
+              <RefreshCw className="h-3 w-3" /> Regenerate
+            </button>
+          </div>
+          <Slider
+            value={[intensity]}
+            min={0}
+            max={1}
+            step={0.05}
+            onValueChange={([v]) => setIntensity(v)}
+          />
+          <div className="flex justify-between text-[11px] text-muted-foreground">
+            <span>Subtle</span>
+            <span>{autoCount} auto {autoCount === 1 ? "zoom" : "zooms"}</span>
+            <span>Bold</span>
+          </div>
         </div>
       )}
     </div>

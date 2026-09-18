@@ -29,6 +29,10 @@ export interface RecordingResult {
   format: ExportFormat;
   durationMs: number;
   compositionEvents: CompositionEvent[];
+  /** ms-from-start timestamps for every explicit "mark a zoom here" trigger
+   * during this take (the floating PiP control, or its in-tab fallback) —
+   * distinct from anything Smart Camera infers on its own. */
+  zoomMarkers: number[];
 }
 
 /**
@@ -43,6 +47,7 @@ export class RecordingSession {
   private pausedAccumMs = 0;
   private pausedAt = 0;
   private events: CompositionEvent[] = [];
+  private zoomMarkers: number[] = [];
   public state: RecorderState = "idle";
   public mimeType = "";
   public format: ExportFormat = "webm";
@@ -53,6 +58,7 @@ export class RecordingSession {
     this.format = picked.format;
     this.chunks = [];
     this.events = [];
+    this.zoomMarkers = [];
     this.pausedAccumMs = 0;
     this.recorder = new MediaRecorder(stream, {
       mimeType: picked.mimeType || undefined,
@@ -92,6 +98,16 @@ export class RecordingSession {
     this.events.push({ atMs: this.getElapsedMs(), type, settings });
   }
 
+  /** Records "the user intentionally pointed at this moment" — from the
+   * floating PiP control or its in-tab fallback button, since neither can
+   * know in advance where on screen to zoom (no cursor-position telemetry
+   * is available; see smartCamera.ts). Resolved into an actual zoom rect
+   * after the fact by searching nearby ActivityTracker samples. */
+  markZoomPoint() {
+    if (this.state !== "recording") return;
+    this.zoomMarkers.push(this.getElapsedMs());
+  }
+
   stop(): Promise<RecordingResult> {
     return new Promise((resolve, reject) => {
       if (!this.recorder) {
@@ -108,6 +124,7 @@ export class RecordingSession {
           format: this.format,
           durationMs,
           compositionEvents: this.events,
+          zoomMarkers: this.zoomMarkers,
         });
       };
       this.recorder.stop();
@@ -124,6 +141,7 @@ export class RecordingSession {
     this.recorder = null;
     this.chunks = [];
     this.events = [];
+    this.zoomMarkers = [];
     this.pausedAccumMs = 0;
     this.state = "idle";
   }

@@ -1,6 +1,6 @@
 export type SourceMode = "screen" | "camera" | "both";
 
-export type BackgroundMode = "none" | "blur" | "image" | "builtin";
+export type BackgroundMode = "none" | "blur" | "image" | "video" | "builtin";
 
 export type BlurStrength = "light" | "medium" | "strong";
 
@@ -86,10 +86,56 @@ export type AspectRatioId = "original" | "16:9" | "9:16" | "1:1" | "4:5";
 
 export type ExportFormat = "mp4" | "webm";
 
+/** Real-time clean-up pass applied to the raw camera feed itself, ahead of
+ * background processing — denoise + sharpen + a mild color/exposure lift,
+ * aimed at the specific "flat, slightly noisy, soft" look of a mediocre
+ * built-in webcam sensor. Doesn't invent resolution or dynamic range the
+ * sensor never captured; it cleans up what's actually there. */
+export interface EnhanceSettings {
+  enabled: boolean;
+  /** 0 (off) – 1 (strong). Scales both the sharpen kernel and the
+   * denoise pre-blur that runs just ahead of it. */
+  strength: number;
+  brightness: number;
+  contrast: number;
+  saturation: number;
+}
+
 export interface RecordingSettings {
   mode: SourceMode;
   layout: LayoutPreset;
+  /** Live composition aspect ratio — forces the recording canvas itself
+   * (not just a post-export crop) into this shape, so a portrait pick
+   * actually records portrait video for mobile-social platforms
+   * (TikTok/Reels/Shorts/Stories) instead of landscape footage that gets
+   * cropped after the fact. "original" keeps today's behavior (screen's
+   * own aspect, or the quality preset's 16:9). */
+  aspectRatio: AspectRatioId;
+  /** How the screen-share source fits into its box wherever it isn't
+   * already sized to match (full-bleed layouts, the top block of Split,
+   * etc). "auto" fills (crops) a portrait/near-square box — the shape a
+   * mobile-social recording uses — and shows the whole screen letterboxed
+   * in a landscape box, matching prior behavior there. "contain" always
+   * shows the whole screen (may letterbox); "cover" always fills the box
+   * (may crop the sides). */
+  screenFitMode: "auto" | "contain" | "cover";
+  /** Manual adjustment on top of a "cover" (or auto-resolved-to-cover) fit
+   * — lets a tight crop be pulled back and repositioned instead of being
+   * stuck with whatever coverFitSource's centered tightest-crop picks. */
+  screenView: {
+    /** 0 = tightest crop (fills the box completely, current default).
+     * 1 = fully zoomed out (shows the entire screen, letterboxed — same
+     * picture "Full" fit shows). Values between blend smoothly with no
+     * distortion at any point. */
+    zoom: number;
+    /** -1..1, which part of the cropped screen is kept when zoom < 1.
+     * No effect at zoom 1 (there's nothing left to shift — the whole
+     * screen is already shown). */
+    panX: number;
+    panY: number;
+  };
   frame: FrameSettings;
+  enhance: EnhanceSettings;
   background: {
     mode: BackgroundMode;
     blurStrength: BlurStrength;
@@ -98,6 +144,8 @@ export interface RecordingSettings {
     imageScale: number;
     imageBrightness: number;
     imageContrast: number;
+    /** Looping background video source (mode "video"), parallel to imageUrl. */
+    videoUrl: string | null;
   };
   camera: CameraTransform;
   quality: QualityPresetId;
@@ -122,6 +170,12 @@ export interface ZoomKeyframe {
   startMs: number;
   endMs: number;
   rect: { x: number; y: number; w: number; h: number };
+  /** "auto" = produced by Smart Camera (lib/recording/smartCamera.ts) from
+   * recorded motion, never hand-authored. Lets the editor tell Smart Camera
+   * regeneration apart from a user's own edits, and lets export apply a
+   * subtle interaction pulse only to auto-detected moments. Undefined (the
+   * manual editor's own default) is treated the same as "manual". */
+  source?: "auto" | "manual";
 }
 
 /** A timestamped change to the composition, captured during recording so a

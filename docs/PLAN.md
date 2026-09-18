@@ -59,9 +59,20 @@ Everything in the PRD's P0 list not covered above:
 - Performance-adaptive quality (auto step-down with an on-screen notice)
 
 ## Phase 3 — P2 (future, not scoped yet)
-AI layout selection, AI cleanup (remove pauses/filler), AI auto-zoom, AI captions,
+AI layout selection, AI cleanup (remove pauses/filler), AI captions,
 AI social reframe, cloud sync / sharing / accounts. Explicitly out of scope until
 the local-first P0/P1 experience is solid — per the PRD's "most important principle."
+
+- [x] **Smart Camera** (pulled forward ahead of the rest of this phase, Sept 2026):
+      auto-generated zoom/pan keyframes from recorded screen motion (no server, no
+      cloud — everything local, same as the rest of the app). `lib/recording/activity.ts`
+      samples the screen source during recording; `lib/recording/smartCamera.ts` turns
+      that into `ZoomKeyframe[]`, the same data the manual zoom editor already produces,
+      so it's fully edit/reset/removable through the existing `ZoomEditor.tsx` UI and
+      applies through the existing `exporter.ts` pipeline with zero changes to how
+      aspect-ratio reframing or export itself works. Deliberately does *not* move the
+      camera during a detected scroll (trackpad momentum or mouse wheel) — that's what
+      keeps scrolling from reading as jerky, without ever asking which device was used.
 
 ## Non-goals for V1
 - No timeline-based video editor
