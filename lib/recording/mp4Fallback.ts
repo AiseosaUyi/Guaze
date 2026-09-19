@@ -138,7 +138,16 @@ export async function transcodeToMp4(source: Blob, opts: TranscodeOptions = {}):
       "-c:v",
       "libx264",
       "-preset",
-      "veryfast",
+      // "ultrafast", not "veryfast": this runs single-threaded in wasm (no
+      // SharedArrayBuffer/cross-origin isolation set up for the -mt core),
+      // so encode speed is the whole bottleneck for a long recording —
+      // measured taking multiple times realtime for real screen-recording
+      // content, meaning a 27-minute take can take the better part of an
+      // hour. -crf keeps quality/bitrate roughly constant across presets;
+      // "ultrafast" trades compression efficiency (somewhat larger file for
+      // the same quality) for the largest available speed win, which is the
+      // right trade for a background fallback path the user is waiting on.
+      "ultrafast",
       "-crf",
       "20",
       "-pix_fmt",
