@@ -54,6 +54,36 @@ async function getFFmpeg(): Promise<FFmpeg> {
 
 export interface TranscodeOptions {
   onProgress?: (fraction: number) => void;
+  /** The source recording's real duration, independently known (e.g. from a
+   * wall-clock timer kept during recording) rather than read off the Blob.
+   * ffmpeg.wasm's own `progress` field is computed from the *input*
+   * container's declared duration — but a `MediaRecorder`-produced WebM is
+   * written as an open-ended live stream with no Duration/Cues element, so
+   * ffmpeg reports "Duration: N/A" and `progress` never leaves 0 even while
+   * actively encoding (the transcode finishes fine; the bar just never
+   * moves, reading as permanently stuck). When this is provided, progress is
+   * computed instead from the event's `time` field — the position actually
+   * encoded so far, in microseconds — against this known duration, which
+   * stays accurate regardless of what the container header claims. */
+  totalDurationMs?: number;
+}
+
+/** Pure fraction computation, split out from the `ffmpeg.on("progress", ...)`
+ * wiring below so it can be unit-tested without spinning up ffmpeg.wasm
+ * itself. See `TranscodeOptions.totalDurationMs` for why `time` (the actual
+ * encoded position) is preferred over ffmpeg's own `progress` ratio whenever
+ * a known-good total duration is available, and clamped/guarded against
+ * ffmpeg.wasm's occasional out-of-[0,1] or NaN reports either way. */
+export function computeTranscodeFraction(
+  event: { progress: number; time: number },
+  totalDurationMs?: number
+): number | null {
+  const knownDurationUs =
+    totalDurationMs != null && Number.isFinite(totalDurationMs) && totalDurationMs > 0
+      ? totalDurationMs * 1000
+      : null;
+  const fraction = knownDurationUs != null ? event.time / knownDurationUs : event.progress;
+  return Number.isFinite(fraction) ? Math.max(0, Math.min(1, fraction)) : null;
 }
 
 /** Re-encodes an arbitrary source video Blob (VP9/Opus WebM in practice) into
@@ -68,11 +98,9 @@ export async function transcodeToMp4(source: Blob, opts: TranscodeOptions = {}):
   const inputName = "input" + (source.type.includes("webm") ? ".webm" : ".bin");
   const outputName = "output.mp4";
 
-  const onProgress = ({ progress }: { progress: number }) => {
-    // ffmpeg.wasm's progress can report slightly outside [0,1] (and briefly
-    // NaN before the first keyframe is measured) — clamp rather than let a
-    // stray value snap the caller's progress bar backward or to 0%.
-    if (Number.isFinite(progress)) opts.onProgress?.(Math.max(0, Math.min(1, progress)));
+  const onProgress = (event: { progress: number; time: number }) => {
+    const fraction = computeTranscodeFraction(event, opts.totalDurationMs);
+    if (fraction != null) opts.onProgress?.(fraction);
   };
   ffmpeg.on("progress", onProgress);
 

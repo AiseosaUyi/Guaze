@@ -69,6 +69,7 @@ export function ExportScreen({
         format,
         aspect,
         zoomKeyframes,
+        sourceDurationMs: result!.durationMs,
         onProgress: (fraction, phase) => {
           setProgress(fraction);
           if (phase) setProgressPhase(phase);

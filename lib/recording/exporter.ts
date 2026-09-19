@@ -12,6 +12,12 @@ export interface ExportOptions {
   format: ExportFormat;
   aspect: AspectRatioId;
   zoomKeyframes?: ZoomKeyframe[];
+  /** The recording's real duration from `RecordingSession`'s own wall-clock
+   * timer (`result.durationMs`), not derived from the source Blob. Passed
+   * through to the ffmpeg.wasm MP4 fallback so it can compute transcode
+   * progress reliably — see `mp4Fallback.ts`'s `totalDurationMs` doc
+   * comment for why the Blob's own duration can't be trusted for this. */
+  sourceDurationMs?: number;
   /** `phase` distinguishes the (fast) canvas re-render pass from the (slow,
    * only when MP4 recording failed and format: "mp4" was requested)
    * ffmpeg.wasm transcode pass, so the caller can label its progress bar
@@ -311,6 +317,7 @@ export async function exportRecording(opts: ExportOptions): Promise<ExportResult
       try {
         const mp4Blob = await transcodeToMp4(result.blob, {
           onProgress: (f) => opts.onProgress?.(f, "transcoding"),
+          totalDurationMs: opts.sourceDurationMs,
         });
         result = { blob: mp4Blob, format: "mp4" };
         outcome = "transcoded-to-mp4";
