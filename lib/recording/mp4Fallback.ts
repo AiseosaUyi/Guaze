@@ -21,6 +21,7 @@
 import type { FFmpeg } from "@ffmpeg/ffmpeg";
 
 let ffmpegPromise: Promise<FFmpeg> | null = null;
+let ffmpegLoaded = false;
 
 async function getFFmpeg(): Promise<FFmpeg> {
   if (!ffmpegPromise) {
@@ -40,6 +41,7 @@ async function getFFmpeg(): Promise<FFmpeg> {
         wasmURL: `${base}/ffmpeg/ffmpeg-core.wasm`,
         classWorkerURL: `${base}/ffmpeg/worker.js`,
       });
+      ffmpegLoaded = true;
       return ffmpeg;
     })().catch((err) => {
       // Let the next call try again instead of permanently caching a
@@ -54,6 +56,16 @@ async function getFFmpeg(): Promise<FFmpeg> {
 
 export interface TranscodeOptions {
   onProgress?: (fraction: number) => void;
+  /** Fired once, synchronously before the actual transcode starts, if (and
+   * only if) ffmpeg.wasm's core hasn't been loaded yet this session.
+   * Measured live: instantiating the ~32MB core (fetch is ~150ms; the
+   * emscripten module's own init — compiling and linking the bundled
+   * libx264/libx265/libvpx/etc — is the actual cost) took ~19s in testing,
+   * dwarfing the transcode itself (~4-7s for a short clip). Until this
+   * fires "done", nothing resembling "conversion progress" exists yet — the
+   * caller should show a distinct "loading" state instead of a frozen 0%,
+   * which is what previously made this look permanently stuck. */
+  onLoadingChange?: (loading: boolean) => void;
   /** The source recording's real duration, independently known (e.g. from a
    * wall-clock timer kept during recording) rather than read off the Blob.
    * ffmpeg.wasm's own `progress` field is computed from the *input*
@@ -67,6 +79,17 @@ export interface TranscodeOptions {
    * stays accurate regardless of what the container header claims. */
   totalDurationMs?: number;
 }
+
+/** Live in-flight progress is capped below 100% — measured live: `time`
+ * (and ffmpeg's own `progress`) can reach the full known duration while a
+ * real double-digit-percent chunk of wall-clock work still remains (10 of
+ * ~20s in testing, on a `-movflags +faststart` mux that has to finish
+ * writing/relocating the moov atom after the last input frame is consumed).
+ * Reserve 1 exclusively for the moment `transcodeToMp4` actually resolves
+ * (see below) — otherwise the bar reports "100%" and then visibly does
+ * nothing for several more seconds, which reads as stuck the same way a
+ * frozen 0% did before this file's other fix. */
+export const MAX_LIVE_FRACTION = 0.97;
 
 /** Pure fraction computation, split out from the `ffmpeg.on("progress", ...)`
  * wiring below so it can be unit-tested without spinning up ffmpeg.wasm
@@ -83,7 +106,7 @@ export function computeTranscodeFraction(
       ? totalDurationMs * 1000
       : null;
   const fraction = knownDurationUs != null ? event.time / knownDurationUs : event.progress;
-  return Number.isFinite(fraction) ? Math.max(0, Math.min(1, fraction)) : null;
+  return Number.isFinite(fraction) ? Math.max(0, Math.min(MAX_LIVE_FRACTION, fraction)) : null;
 }
 
 /** Re-encodes an arbitrary source video Blob (VP9/Opus WebM in practice) into
@@ -93,7 +116,10 @@ export function computeTranscodeFraction(
  * "plays nowhere" MP4 this exists to avoid producing. */
 export async function transcodeToMp4(source: Blob, opts: TranscodeOptions = {}): Promise<Blob> {
   const { fetchFile } = await import("@ffmpeg/util");
+  const needsLoad = !ffmpegLoaded;
+  if (needsLoad) opts.onLoadingChange?.(true);
   const ffmpeg = await getFFmpeg();
+  if (needsLoad) opts.onLoadingChange?.(false);
 
   const inputName = "input" + (source.type.includes("webm") ? ".webm" : ".bin");
   const outputName = "output.mp4";
@@ -133,6 +159,8 @@ export async function transcodeToMp4(source: Blob, opts: TranscodeOptions = {}):
     // SharedArrayBuffer), and Blob's constructor type only accepts a view
     // backed by a real ArrayBuffer.
     const bytes = data instanceof Uint8Array ? new Uint8Array(data) : new TextEncoder().encode(String(data));
+    // The only point that reports a true 1 — see MAX_LIVE_FRACTION above.
+    opts.onProgress?.(1);
     return new Blob([bytes], { type: "video/mp4" });
   } finally {
     ffmpeg.off("progress", onProgress);

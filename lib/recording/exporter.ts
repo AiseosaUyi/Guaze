@@ -21,8 +21,12 @@ export interface ExportOptions {
   /** `phase` distinguishes the (fast) canvas re-render pass from the (slow,
    * only when MP4 recording failed and format: "mp4" was requested)
    * ffmpeg.wasm transcode pass, so the caller can label its progress bar
-   * accurately instead of implying the whole thing is one uniform step. */
-  onProgress?: (fraction: number, phase?: "recording" | "transcoding") => void;
+   * accurately instead of implying the whole thing is one uniform step.
+   * "loading" is a distinct third phase, fired only the first time this
+   * session ffmpeg.wasm's core actually needs loading — measured at ~19s
+   * (vs. ~4-7s for the transcode itself that follows it), so collapsing it
+   * into "transcoding"'s 0% is what previously made export look frozen. */
+  onProgress?: (fraction: number, phase?: "recording" | "loading" | "transcoding") => void;
 }
 
 const FULL_RECT = { x: 0, y: 0, w: 1, h: 1 };
@@ -317,6 +321,9 @@ export async function exportRecording(opts: ExportOptions): Promise<ExportResult
       try {
         const mp4Blob = await transcodeToMp4(result.blob, {
           onProgress: (f) => opts.onProgress?.(f, "transcoding"),
+          onLoadingChange: (loading) => {
+            if (loading) opts.onProgress?.(0, "loading");
+          },
           totalDurationMs: opts.sourceDurationMs,
         });
         result = { blob: mp4Blob, format: "mp4" };

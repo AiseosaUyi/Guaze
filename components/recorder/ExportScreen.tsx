@@ -28,7 +28,7 @@ export function ExportScreen({
   const [aspect, setAspect] = React.useState<AspectRatioId>("original");
   const [exporting, setExporting] = React.useState(false);
   const [progress, setProgress] = React.useState(0);
-  const [progressPhase, setProgressPhase] = React.useState<"recording" | "transcoding">("recording");
+  const [progressPhase, setProgressPhase] = React.useState<"recording" | "loading" | "transcoding">("recording");
   const [exportedUrl, setExportedUrl] = React.useState<string | null>(null);
   const [exportedName, setExportedName] = React.useState("");
   const [exportError, setExportError] = React.useState<string | null>(null);
@@ -211,7 +211,15 @@ export function ExportScreen({
             {!exportedUrl ? (
               <Button className="w-full" onClick={() => void handleExport()} disabled={exporting}>
                 {exporting
-                  ? `${progressPhase === "transcoding" ? "Converting to MP4" : "Exporting"}… ${Math.round(progress * 100)}%`
+                  ? progressPhase === "loading"
+                    ? // First MP4 export this session only — loading ffmpeg.wasm's
+                      // ~32MB core measured at ~19s in testing, dwarfing the
+                      // transcode that follows it (~4-7s for a short clip). No
+                      // percentage here: nothing resembling conversion progress
+                      // exists yet, and showing a frozen "0%" during this is
+                      // exactly what previously read as the export being stuck.
+                      "Loading video converter (first time only)…"
+                    : `${progressPhase === "transcoding" ? "Converting to MP4" : "Exporting"}… ${Math.round(progress * 100)}%`
                   : "Export Video"}
               </Button>
             ) : (
